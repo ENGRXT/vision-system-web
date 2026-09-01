@@ -26,6 +26,13 @@ if [ ! -f .env ]; then
     echo "  -> Edite .env (POSTGRES_PASSWORD, AI_BASE_URL, etc.) si es necesario."
 fi
 
+if [ ! -f "$INSTALL_DIR/docker/certs/server.crt" ]; then
+    log "Generando certificados TLS self-signed (camara requiere HTTPS)..."
+    bash scripts/gen-certs.sh
+else
+    log "Certificados TLS ya existen en docker/certs/"
+fi
+
 log "Construyendo e iniciando contenedores..."
 docker compose -f docker/docker-compose.yml up -d --build
 
@@ -44,8 +51,11 @@ done
 log "Esperando healthcheck..."
 for i in $(seq 1 30); do
     if curl -fsS http://127.0.0.1:8080/health/live >/dev/null 2>&1; then
-        log "OK: VISION-SYSTEM WEB disponible en http://127.0.0.1:8080"
-        log "Documentacion: http://127.0.0.1:8080/docs"
+        log "OK: VISION-SYSTEM WEB disponible en https://<host>:${VISION_HTTPS_PORT:-443} (UI, camara)"
+        log "     API/health en http://127.0.0.1:8080"
+        log "Documentacion: https://<host>:${VISION_HTTPS_PORT:-443}/docs"
+        log "Nota: al ser self-signed, el navegador pedira confirmar la conexion una vez"
+        log "      (o instalar docker/certs/ca.crt como CA de confianza)."
         exit 0
     fi
     sleep 2

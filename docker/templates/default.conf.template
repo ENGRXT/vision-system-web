@@ -1,0 +1,36 @@
+# VISION-SYSTEM WEB - Nginx: HTTP + HTTPS
+#
+# HTTP (80):  API, health, static y evidencia para clientes no-navegador
+#             (curl, monitoring, scripts). La raiz "/" redirige a HTTPS.
+# HTTPS (443): UI para navegador. getUserMedia (camara) REQUIERE secure
+#             context: https:// o localhost. Edge/Chrome/Firefox/Safari.
+#
+# ${VISION_HTTPS_PORT} es renderizado por el entrypoint de la imagen
+# oficial nginx (envsubst sobre /etc/nginx/templates/*.template).
+
+server {
+    listen 80;
+    server_name _;
+
+    # Los navegadores siempre aterrizan en HTTPS (camara)
+    location = / {
+        return 301 https://$host:${VISION_HTTPS_PORT}/;
+    }
+
+    include /etc/nginx/snippets/vision-locations.conf;
+}
+
+# Sin http2: WebSocket solo se soporta sobre HTTP/1.1 (RFC 6455) y
+# maximiza compatibilidad con navegadores en estacion industrial.
+server {
+    listen 443 ssl;
+    server_name _;
+
+    ssl_certificate     /etc/nginx/certs/server.crt;
+    ssl_certificate_key /etc/nginx/certs/server.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    include /etc/nginx/snippets/vision-locations.conf;
+}

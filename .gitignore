@@ -16,6 +16,9 @@ github-account.txt
 *.pem
 *.key
 
+# Certificados TLS generados (gen-certs.sh)
+docker/certs/
+
 # Datos locales
 evidence/
 logs/

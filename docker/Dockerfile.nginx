@@ -1,7 +1,9 @@
-# Reverse proxy industrial: HTTP + WebSocket
+# Reverse proxy industrial: HTTP + HTTPS (camara) + WebSocket
 FROM nginx:1.27-alpine
 
 COPY docker/nginx.conf /etc/nginx/nginx.conf
-COPY docker/default.conf /etc/nginx/conf.d/default.conf
+# El entrypoint de nginx renderiza *.template -> /etc/nginx/conf.d/ (envsubst)
+COPY docker/templates/default.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/snippets/vision-locations.conf /etc/nginx/snippets/vision-locations.conf
 
-EXPOSE 80
+EXPOSE 80 443

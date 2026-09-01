@@ -66,9 +66,9 @@ docker compose -f docker/docker-compose.yml up -d --build
 docker compose -f docker/docker-compose.yml exec api alembic upgrade head
 ```
 
-- UI: `http://<host>:8080/`
-- Swagger: `http://<host>:8080/docs`
-- Health: `http://<host>:8080/health/ready`
+- UI (navegador, cámara): `https://<host>:443/`
+- Swagger: `https://<host>:443/docs`
+- Health/API (no navegador): `http://127.0.0.1:8080/health/ready`
 
 ### Desarrollo local (sin Docker)
 
@@ -97,9 +97,41 @@ Prioridad: **variables de entorno** (`.env`) > `config.yaml` (`VISION_CONFIG`) >
 | `STORAGE_BASE_PATH` | `/app/evidence` | Raíz de evidencia en servidor |
 | `LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR |
 | `POSTGRES_PASSWORD` | `vision_password_change_me` | Solo compose (prod: cambiar) |
+| `VISION_HTTPS_PORT` | `443` | Puerto HTTPS publicado (nginx) |
 
 También editable **en caliente** desde la UI (panel Administración) vía
 `PUT /api/config` (emite `CONFIG_UPDATED` a todas las estaciones).
+
+## HTTPS (cámara)
+
+`getUserMedia` (cámara web) **solo funciona en secure context**: `https://` o
+`localhost`. Por eso nginx sirve dos servicios:
+
+| Puerto | Uso |
+|---|---|
+| `80` (→ `8080` host) | API, health, evidencia para clientes no-navegador (curl, monitoring). La raíz `/` redirige 301 a HTTPS |
+| `443` (→ `VISION_HTTPS_PORT`) | UI para navegador (Edge, Chrome, Firefox, Safari) con cámara y WSS |
+
+El frontend elige `ws://` o `wss://` automáticamente según el protocolo de la página.
+
+### Certificados
+
+`install.sh` genera automáticamente una **CA local + certificado self-signed**
+(`scripts/gen-certs.sh` → `docker/certs/`) con SANs automáticas: `localhost`,
+hostname e IPs locales. Para un IP/hostname fijo de la estación:
+
+```bash
+VISION_CERT_HOSTS="10.145.123.50,estacion-01" bash scripts/gen-certs.sh
+docker compose -f docker/docker-compose.yml restart nginx
+```
+
+Al ser self-signed, el navegador muestra un aviso de seguridad en el primer
+acceso (Edge/Chrome: **Avanzado → Continuar a <host>**; Firefox: **Aceptar el
+riesgo y continuar**). Para eliminarlo en la estación (recomendado en kiosk),
+instale `docker/certs/ca.crt` en el almacén de confianza del SO:
+
+- **Windows**: doble clic en `ca.crt` → *Instalar certificado* → *Local del
+  equipo* → *Colocar en: Autoridades de certificación de raíz de confianza*.
 
 ## API
 
