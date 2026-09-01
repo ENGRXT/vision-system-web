@@ -2,7 +2,7 @@
 # Instalacion rapida de VISION-SYSTEM WEB (requiere Docker + docker compose).
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/RECONNEXT-USER/vision-system-web.git}"
+REPO_URL="${REPO_URL:-https://github.com/ENGRXT/vision-system-web.git}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/vision-system-web}"
 COMPOSE_FILE="${INSTALL_DIR}/docker/docker-compose.yml"
 
