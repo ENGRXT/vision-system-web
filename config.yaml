@@ -1,0 +1,19 @@
+# VISION-SYSTEM WEB - Configuracion base (config.yaml)
+# Prioridad: variables de entorno (.env) > config.yaml > defaults del codigo.
+# La ruta del archivo se indica con la variable de entorno VISION_CONFIG.
+
+app_name: "VISION-SYSTEM WEB"
+app_version: "4.0.0"
+
+database_url: "postgresql+asyncpg://vision:vision_password_change_me@postgres:5432/vision_system"
+log_level: "INFO"
+
+ai_base_url: "http://10.145.123.27:8000/v1"
+ai_model_name: "qwen3-vl"
+ai_api_key: "dummy"
+ai_timeout_seconds: 180
+ai_max_retries: 2
+ai_max_tokens: 4096
+ai_temperature: 0.0
+
+storage_base_path: "/app/evidence"

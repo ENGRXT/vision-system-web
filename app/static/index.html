@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VISION-SYSTEM WEB v4.0 — Inspección de Sockets</title>
+  <link rel="icon" type="image/x-icon" href="/static/assets/favicon.ico" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            industrial: { 900: '#0b1220', 800: '#101a2e', 700: '#16233d', 600: '#1e2f4f' },
+          },
+          fontFamily: { mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'] },
+        },
+      },
+    };
+  </script>
+  <link rel="stylesheet" href="/static/css/tailwind.css" />
+</head>
+<body class="bg-industrial-900 text-slate-200 font-sans min-h-screen">
+
+  <!-- ======================= HEADER ======================= -->
+  <header class="bg-industrial-800 border-b border-slate-700 px-4 py-3 sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center gap-3">
+      <div class="flex items-center gap-2">
+        <span class="text-xl">🔍</span>
+        <h1 class="text-lg font-bold tracking-wide text-white">VISION-SYSTEM <span class="text-sky-400">WEB</span> v4.0</h1>
+      </div>
+
+      <div class="flex items-center gap-2 ml-2">
+        <label for="station-select" class="text-xs uppercase text-slate-400">Estación</label>
+        <select id="station-select" class="bg-industrial-700 border border-slate-600 rounded px-2 py-1 text-sm"></select>
+        <label for="operator-input" class="text-xs uppercase text-slate-400 ml-2">Operador</label>
+        <input id="operator-input" type="text" maxlength="50" placeholder="OP001"
+               class="bg-industrial-700 border border-slate-600 rounded px-2 py-1 text-sm w-24" />
+      </div>
+
+      <div class="ml-auto flex items-center gap-2 text-xs font-mono">
+        <span id="ws-status" class="status-pill status-offline">WS: --</span>
+        <span id="ai-status" class="status-pill status-offline">IA: --</span>
+        <span id="db-status" class="status-pill status-offline">DB: --</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ======================= MAIN ======================= -->
+  <main class="max-w-7xl mx-auto p-4 grid grid-cols-1 lg:grid-cols-5 gap-4">
+
+    <!-- Columna izquierda: camara + resultado -->
+    <div class="lg:col-span-3 space-y-4">
+
+      <!-- Camara -->
+      <section class="bg-industrial-800 rounded-lg border border-slate-700 p-4">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">
+          📷 Preview de Cámara <span class="normal-case font-normal">(WebRTC getUserMedia)</span>
+        </h2>
+        <div class="relative bg-black rounded overflow-hidden" style="aspect-ratio: 16/9;">
+          <video id="camera-video" class="w-full h-full object-contain" autoplay playsinline muted></video>
+          <div id="camera-placeholder"
+               class="absolute inset-0 flex items-center justify-center text-slate-500 text-sm">
+            Solicitando acceso a cámara...
+          </div>
+        </div>
+        <div class="mt-3 flex items-center gap-3">
+          <button id="btn-capture" disabled
+                  class="bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded px-5 py-2">
+            📸 CAPTURAR
+          </button>
+          <span id="capture-status" class="text-sm text-slate-400">Esperando cámara...</span>
+        </div>
+      </section>
+
+      <!-- Resultado -->
+      <section class="bg-industrial-800 rounded-lg border border-slate-700 p-4">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">
+          ✅ Resultado de Inspección
+        </h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="bg-black/40 rounded flex items-center justify-center min-h-[220px] overflow-hidden">
+            <img id="result-image" class="max-h-[320px] w-auto hidden" alt="Imagen anotada" />
+            <span id="result-placeholder" class="text-slate-600 text-sm">Sin inspección aún</span>
+          </div>
+          <div class="space-y-3">
+            <div class="flex items-center gap-3">
+              <span class="text-sm text-slate-400">Resultado:</span>
+              <span id="result-status" class="badge badge-unknown">--</span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-sm">
+              <div class="bg-industrial-700 rounded p-2">
+                <div class="text-xs text-slate-400">Defectos</div>
+                <div id="result-defects" class="font-mono text-lg">--</div>
+              </div>
+              <div class="bg-industrial-700 rounded p-2">
+                <div class="text-xs text-slate-400">Confianza</div>
+                <div id="result-confidence" class="font-mono text-lg">--</div>
+              </div>
+              <div class="bg-industrial-700 rounded p-2">
+                <div class="text-xs text-slate-400">Tiempo IA</div>
+                <div id="result-time" class="font-mono text-lg">--</div>
+              </div>
+              <div class="bg-industrial-700 rounded p-2">
+                <div class="text-xs text-slate-400">Socket</div>
+                <div id="result-socket" class="font-mono text-lg">--</div>
+              </div>
+            </div>
+            <ul id="result-locations" class="text-sm list-disc list-inside text-red-300 space-y-1"></ul>
+            <p id="result-observations" class="text-sm text-slate-300"></p>
+            <div class="flex flex-wrap gap-2 pt-1">
+              <button id="btn-force-pass" disabled
+                      class="bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white text-sm rounded px-3 py-1.5">
+                Forzar PASS
+              </button>
+              <button id="btn-force-fail" disabled
+                      class="bg-red-700 hover:bg-red-600 disabled:opacity-40 text-white text-sm rounded px-3 py-1.5">
+                Forzar FAIL
+              </button>
+              <a id="btn-view-evidence" href="#" target="_blank"
+                 class="bg-slate-700 hover:bg-slate-600 text-white text-sm rounded px-3 py-1.5 hidden">
+                📁 Ver Evidencia
+              </a>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Columna derecha: notificaciones + config rapida + admin -->
+    <div class="lg:col-span-2 space-y-4">
+
+      <!-- Notificaciones en vivo -->
+      <section class="bg-industrial-800 rounded-lg border border-slate-700 p-4">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">
+          🔔 Panel de Notificaciones en Vivo
+          <span id="ws-conn-count" class="text-slate-500 font-normal"></span>
+        </h2>
+        <div id="notification-panel"
+             class="space-y-2 max-h-72 overflow-y-auto pr-1">
+          <div class="text-sm text-slate-500">Esperando eventos...</div>
+        </div>
+      </section>
+
+      <!-- Configuracion rapida -->
+      <section class="bg-industrial-800 rounded-lg border border-slate-700 p-4 space-y-3">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">
+          ⚙️ Configuración Rápida
+        </h2>
+        <div class="grid grid-cols-2 gap-2 text-sm">
+          <div>
+            <label class="text-xs text-slate-400">Modelo IA</label>
+            <select id="model-select" class="w-full bg-industrial-700 border border-slate-600 rounded px-2 py-1">
+              <option value="">(detectar)</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400">Socket</label>
+            <select id="socket-select" class="w-full bg-industrial-700 border border-slate-600 rounded px-2 py-1">
+              <option value="AUTO">Auto</option>
+              <option value="INTEL_LGA1700">Intel LGA1700</option>
+              <option value="AMD_AM5">AMD AM5</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label for="serial-input" class="text-xs text-slate-400">N.º de Serie</label>
+          <div class="relative">
+            <input id="serial-input" type="text" maxlength="50" placeholder="Escanea o escribe el serial"
+                   class="w-full bg-industrial-700 border border-slate-600 rounded px-2 py-2 font-mono uppercase" />
+            <span id="serial-blink" class="absolute right-2 top-1/2 -translate-y-1/2 text-sky-400 hidden">▍</span>
+          </div>
+          <p class="text-xs text-slate-500 mt-1">(Escáner USB HID emula teclado — el Enter inicia la inspección)</p>
+        </div>
+        <button id="btn-start"
+                class="w-full bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded px-4 py-2.5">
+          ▶ INICIAR INSPECCIÓN
+        </button>
+        <div class="text-sm flex justify-between">
+          <span class="text-slate-400">Estado:
+            <span id="inspection-state" class="font-mono text-amber-300">ESPERANDO</span>
+          </span>
+          <span class="text-slate-500">Última: <span id="last-inspection-time" class="font-mono">--:--:--</span></span>
+        </div>
+      </section>
+
+      <!-- Admin -->
+      <section class="bg-industrial-800 rounded-lg border border-slate-700 p-4">
+        <button id="btn-admin-toggle" class="w-full flex items-center justify-between text-sm font-semibold uppercase tracking-wider text-slate-400">
+          <span>🛠️ Administración</span><span id="admin-arrow">▸</span>
+        </button>
+        <div id="admin-panel" class="hidden mt-3 space-y-3 text-sm">
+          <div class="grid grid-cols-2 gap-2">
+            <div class="col-span-2">
+              <label class="text-xs text-slate-400">Endpoint IA (base URL)</label>
+              <input id="admin-ai-url" type="text" class="w-full bg-industrial-700 border border-slate-600 rounded px-2 py-1 font-mono text-xs" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-400">Modelo (nombre)</label>
+              <input id="admin-model-name" type="text" class="w-full bg-industrial-700 border border-slate-600 rounded px-2 py-1 font-mono text-xs" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-400">Timeout (s)</label>
+              <input id="admin-timeout" type="number" min="1" max="600" class="w-full bg-industrial-700 border border-slate-600 rounded px-2 py-1" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-400">Reintentos</label>
+              <input id="admin-retries" type="number" min="0" max="5" class="w-full bg-industrial-700 border border-slate-600 rounded px-2 py-1" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-400">Log level</label>
+              <select id="admin-loglevel" class="w-full bg-industrial-700 border border-slate-600 rounded px-2 py-1">
+                <option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option>
+              </select>
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button id="btn-test-ai" class="bg-indigo-700 hover:bg-indigo-600 text-white rounded px-3 py-1.5 text-xs">🔌 Test IA</button>
+            <button id="btn-save-config" class="bg-slate-600 hover:bg-slate-500 text-white rounded px-3 py-1.5 text-xs">💾 Guardar Config</button>
+          </div>
+          <div id="admin-status" class="text-xs text-slate-400 font-mono"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="text-center text-xs text-slate-600 py-4">
+    VISION-SYSTEM WEB v4.0.0 — Qwen3-VL-32B-Instruct-FP8 vía vLLM — ReconNext Engineering
+  </footer>
+
+  <!-- Scripts (vanilla ES6+, sin build step) -->
+  <script src="/static/js/websocket.js"></script>
+  <script src="/static/js/camera.js"></script>
+  <script src="/static/js/inspection.js"></script>
+  <script src="/static/js/admin.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

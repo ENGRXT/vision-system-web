@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets / credenciales (NUNCA subir)
+.env
+.env.*
+!.env.example
+github-account.txt
+*.pem
+*.key
+
+# Datos locales
+evidence/
+logs/
+backups/
+*.log
+*.sqlite3
+.DS_Store

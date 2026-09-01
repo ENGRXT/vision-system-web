@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+github-account.txt
+*.md
+!README.md
+tests/
+.pytest_cache/
+__pycache__/
+*.pyc
+.venv/
+venv/
+evidence/
+logs/
+backups/
+*.log
