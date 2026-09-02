@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Test Camara — VISION-SYSTEM</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:24px; }
+  h1 { font-size:1.4rem; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+  .chip { background:#1e293b; border:1px solid #334155; border-radius:8px; padding:8px 12px; font-size:.95rem; }
+  .ok { color:#4ade80; font-weight:600; }
+  .bad { color:#f87171; font-weight:600; }
+  .warn { color:#fbbf24; font-weight:600; }
+  video { width:100%; max-width:720px; background:#000; border-radius:8px; margin-top:12px; min-height:120px; }
+  button { background:#2563eb; color:#fff; border:0; border-radius:8px; padding:12px 20px; font-size:1rem; cursor:pointer; margin-top:12px; }
+  button:hover { background:#1d4ed8; }
+  pre { background:#020617; padding:12px; border-radius:8px; overflow:auto; font-size:.8rem; max-height:300px; }
+  #banner { font-size:1.3rem; font-weight:700; padding:14px; border-radius:8px; margin-top:12px; }
+  .b-ok { background:#14532d; } .b-bad { background:#7f1d1d; } .b-run { background:#1e3a8a; }
+  .hint { color:#94a3b8; font-size:.9rem; }
+</style>
+</head>
+<body>
+<h1>Diagnóstico de cámara (navegador)</h1>
+<p class="hint">Cierra la aplicación de cámara del sistema antes de probar (puede reservar el dispositivo).</p>
+<div id="banner" class="b-run">Ejecutando diagnóstico…</div>
+<div class="row">
+  <div class="chip">URL: <b id="d-url"></b></div>
+  <div class="chip">isSecureContext: <b id="d-secure"></b></div>
+  <div class="chip">mediaDevices: <b id="d-md"></b></div>
+  <div class="chip">Permiso: <b id="d-perm"></b></div>
+  <div class="chip">Videoinputs: <b id="d-count"></b></div>
+</div>
+<div id="d-devices"></div>
+<video id="video" autoplay playsinline muted></video>
+<div id="d-result"></div>
+<button id="btn">Repetir diagnóstico</button>
+<pre id="d-json"></pre>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+
+async function diag() {
+  const r = {
+    ts: new Date().toISOString(),
+    url: location.href,
+    isSecureContext: window.isSecureContext,
+    protocol: location.protocol,
+    host: location.host,
+    mediaDevices: typeof navigator.mediaDevices,
+    userAgent: navigator.userAgent,
+    permission_state: null,
+    devices: [],
+    getUserMedia: null,
+  };
+  $('banner').className = 'b-run';
+  $('banner').textContent = 'Ejecutando diagnóstico…';
+  $('d-url').textContent = location.href;
+  $('d-secure').textContent = String(window.isSecureContext);
+  $('d-secure').className = window.isSecureContext ? 'ok' : 'bad';
+  $('d-md').textContent = r.mediaDevices;
+  $('d-md').className = r.mediaDevices === 'object' ? 'ok' : 'bad';
+
+  try {
+    const p = await navigator.permissions.query({ name: 'camera' });
+    r.permission_state = p.state;
+  } catch (e) {
+    r.permission_state = 'query error: ' + e.message;
+  }
+  $('d-perm').textContent = r.permission_state;
+
+  let devices = [];
+  try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (e) {}
+  r.devices = devices.map(d => ({ kind: d.kind, deviceId: d.deviceId, label: d.label || '(sin etiqueta)' }));
+  const cams = r.devices.filter(d => d.kind === 'videoinput');
+  $('d-count').textContent = String(cams.length);
+  $('d-count').className = cams.length ? 'ok' : 'warn';
+  $('d-devices').innerHTML = '<div class="row">' + r.devices.map(d =>
+    '<div class="chip">' + d.kind + ': ' + d.label + '</div>').join('') + '</div>';
+
+  const video = $('video');
+  if (r.isSecureContext && r.mediaDevices === 'object') {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      });
+      video.srcObject = stream;
+      await video.play();
+      await new Promise(res => setTimeout(res, 1500));
+      const t = stream.getVideoTracks()[0];
+      const s = t.getSettings();
+      r.getUserMedia = { ok: true, label: t.label, width: s.width, height: s.height, fps: s.frameRate };
+      $('d-result').innerHTML = '<span class="ok">Cámara activa en el navegador</span>';
+      $('banner').className = 'b-ok';
+      $('banner').textContent = 'La cámara funciona en el navegador';
+      stream.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+    } catch (e) {
+      r.getUserMedia = { ok: false, name: e.name, message: e.message };
+      $('d-result').innerHTML = '<span class="bad">getUserMedia: ' + e.name + ' — ' + e.message + '</span>';
+      $('banner').className = 'b-bad';
+      $('banner').textContent = 'La cámara no se pudo iniciar en el navegador';
+    }
+  } else {
+    r.getUserMedia = {
+      ok: false,
+      name: 'SECURE_CONTEXT',
+      message: 'isSecureContext=' + r.isSecureContext + ' mediaDevices=' + r.mediaDevices,
+    };
+    $('banner').className = 'b-bad';
+    $('banner').textContent = 'Contexto no seguro: el navegador bloquea la cámara';
+  }
+  $('d-json').textContent = JSON.stringify(r, null, 2);
+  try {
+    await fetch('/api/debug/browser', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(r),
+    });
+  } catch (e) {}
+}
+
+$('btn').addEventListener('click', diag);
+diag();
+</script>
+</body>
+</html>

@@ -14,7 +14,7 @@ from sqlalchemy import inspect
 from app.config import settings
 from app.database import Base, engine
 from app import models  # noqa: F401  (registra tablas en Base.metadata)
-from app.routers import config, evidence, health, inspection, websocket
+from app.routers import config, debug, evidence, health, inspection, websocket
 from app.utils.logger import setup_logger
 from app.utils.validators import SOCKET_TYPES  # noqa: F401
 
@@ -93,6 +93,7 @@ app.include_router(inspection.router)
 app.include_router(evidence.router)
 app.include_router(config.router)
 app.include_router(websocket.router)
+app.include_router(debug.router)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

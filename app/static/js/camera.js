@@ -27,8 +27,24 @@ class CameraManager {
             return true;
         } catch (err) {
             console.error('[Camera] Error getUserMedia:', err);
-            if (status) status.textContent = 'Error de camara: ' + err.message;
-            if (placeholder) placeholder.textContent = 'Sin acceso a camara. Verifica permisos.';
+            let msg;
+            switch (err.name) {
+                case 'NotAllowedError':
+                    msg = 'Permiso denegado: permite la camara en el navegador y reintenta.';
+                    break;
+                case 'NotFoundError':
+                case 'DevicesNotFoundError':
+                    msg = 'No se detecto camara.';
+                    break;
+                case 'NotReadableError':
+                case 'TrackStartError':
+                    msg = 'Camara ocupada por otra aplicacion. Cierra-la e intenta de nuevo.';
+                    break;
+                default:
+                    msg = 'Error de camara: ' + err.message;
+            }
+            if (status) status.textContent = msg;
+            if (placeholder) placeholder.textContent = msg;
             this.ready = false;
             return false;
         }

@@ -23,15 +23,17 @@ Rules:
 4. If any defect is found, status must be FAIL and describe each location.
 5. Confidence must be a float between 0.0 and 1.0.
 6. The socket_type_detected field should be INTEL_LGA or AMD_AM5 based on visual cues.
+7. ALL text values in the JSON (observations, defect_locations) MUST be written in Spanish (español).
+   Status, socket_type_detected and enum-like values stay in English as defined in the schema.
 
 JSON Schema:
 {
   "status": "string (PASS|FAIL|UNCERTAIN)",
   "defect_count": "integer",
-  "defect_locations": ["string"],
+  "defect_locations": ["string (descripciones en español)"],
   "confidence": "float",
-  "observations": "string",
-  "socket_type_detected": "string"
+  "observations": "string (descripción en español)",
+  "socket_type_detected": "string (INTEL_LGA|AMD_AM5|UNKNOWN)"
 }"""
 
 USER_PROMPT_TEMPLATE = (

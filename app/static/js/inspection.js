@@ -9,9 +9,20 @@ const InspectionFlow = {
         this.camera = new CameraManager(document.getElementById('camera-video'));
         this._bindEvents();
         this._loadPersistedIdentity();
+        this._startCamera();
+    },
+
+    _startCamera() {
+        const retryBtn = document.getElementById('btn-camera-retry');
+        if (retryBtn) retryBtn.classList.add('hidden');
+        this.camera.start().then(ok => {
+            if (!ok && retryBtn) retryBtn.classList.remove('hidden');
+        });
     },
 
     _bindEvents() {
+        document.getElementById('btn-camera-retry').addEventListener('click', () => this._startCamera());
+
         document.getElementById('btn-capture').addEventListener('click', async () => {
             const status = document.getElementById('capture-status');
             try {

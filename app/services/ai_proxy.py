@@ -121,7 +121,18 @@ class AIProxyService:
                     )
                     response.raise_for_status()
 
-                content = response.json()["choices"][0]["message"]["content"]
+                choice = response.json()["choices"][0]
+                message = choice.get("message") or {}
+                content = message.get("content")
+                if not content:
+                    content = message.get("reasoning") or message.get(
+                        "reasoning_content"
+                    )
+                if not content:
+                    raise RuntimeError(
+                        "vLLM devolvio respuesta vacia "
+                        f"(finish_reason={choice.get('finish_reason')})"
+                    )
                 result = self._parse_response(content)
 
                 if self.circuit_open:
