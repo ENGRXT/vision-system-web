@@ -195,3 +195,156 @@ def test_index_serves_frontend(integration_client):
 
     r = tc.get("/static/js/app.js")
     assert r.status_code == 200
+
+
+def test_inspection_events_only_reach_own_station(integration_client, storage_dir, mock_ai_fail):
+    """Con 2 estaciones en paralelo, los eventos de inspeccion de la
+    estacion A NO deben llegar al navegador de la estacion B (causa raiz
+    de la confusion de imagenes/resultados entre equipos)."""
+    import threading
+    import time
+
+    tc = integration_client
+    received_b: list = []
+
+    with tc.websocket_connect(WS_URL) as ws_a:  # estacion QA-01
+        ws_a.receive_json()  # su propio STATION_CONNECTED
+
+        with tc.websocket_connect("/ws/notifications?station_id=QA-02") as ws_b:
+            ws_a.receive_json()  # STATION_CONNECTED de QA-02 (evento global)
+            ws_b.receive_json()  # su propio STATION_CONNECTED
+
+            # Drena QA-02 en segundo plano: debe recibir NADA de la inspeccion
+            def _drain_b():
+                try:
+                    while True:
+                        received_b.append(ws_b.receive_json())
+                except Exception:
+                    pass  # conexion cerrada
+
+            t = threading.Thread(target=_drain_b, daemon=True)
+            t.start()
+            time.sleep(0.3)  # deja al hilo bloqueado en receive
+
+            resp = _post_inspection(tc, serial="WSTEST02")  # desde QA-01
+            assert resp.status_code == 200, resp.text
+
+            # La estacion propietaria (QA-01) recibe sus 3 eventos
+            started = ws_a.receive_json()
+            assert started["event"] == "INSPECTION_STARTED"
+            completed = ws_a.receive_json()
+            assert completed["event"] == "INSPECTION_COMPLETED"
+            defect = ws_a.receive_json()
+            assert defect["event"] == "DEFECT_DETECTED"
+            assert defect["data"]["station_id"] == "QA-01"
+
+            time.sleep(0.5)  # margen para que (si hubiera fuga) llegara
+            t.join(timeout=2)
+
+    leak = [
+        m for m in received_b
+        if m["event"] in {"INSPECTION_STARTED", "INSPECTION_COMPLETED", "DEFECT_DETECTED"}
+    ]
+    assert not leak, f"QA-02 recibio eventos de inspeccion de QA-01: {leak}"
+
+
+def test_unknown_station_receives_no_inspection_events(integration_client, storage_dir, mock_ai_fail):
+    """Una conexion con estacion desconocida/vacia (UNKNOWN) NO recibe
+    eventos de inspeccion de otra estacion (default seguro): si un cliente
+    se conecta con identificacion erronea, no debe ver ni sonar con los
+    resultados ajenos. Solo recibe eventos GLOBALES."""
+    import threading
+    import time
+
+    tc = integration_client
+    received_unknown: list = []
+
+    with tc.websocket_connect(WS_URL) as ws_qa:  # estacion propietaria
+        ws_qa.receive_json()  # su propio STATION_CONNECTED
+
+        with tc.websocket_connect(
+            "/ws/notifications?station_id=UNKNOWN"
+        ) as ws_unknown:
+            ws_qa.receive_json()  # STATION_CONNECTED de UNKNOWN (global)
+            ws_unknown.receive_json()  # su propio STATION_CONNECTED
+
+            def _drain_unknown():
+                try:
+                    while True:
+                        received_unknown.append(ws_unknown.receive_json())
+                except Exception:
+                    pass  # conexion cerrada
+
+            t = threading.Thread(target=_drain_unknown, daemon=True)
+            t.start()
+            time.sleep(0.3)
+
+            resp = _post_inspection(tc, serial="UNKNOWNLEAK01")  # desde QA-01
+            assert resp.status_code == 200, resp.text
+
+            # La estacion propietaria recibe sus 3 eventos
+            assert ws_qa.receive_json()["event"] == "INSPECTION_STARTED"
+            assert ws_qa.receive_json()["event"] == "INSPECTION_COMPLETED"
+            assert ws_qa.receive_json()["event"] == "DEFECT_DETECTED"
+
+            time.sleep(0.5)
+            t.join(timeout=2)
+
+    leak = [
+        m for m in received_unknown
+        if m["event"] in {"INSPECTION_STARTED", "INSPECTION_COMPLETED", "DEFECT_DETECTED"}
+    ]
+    assert not leak, f"UNKNOWN recivio eventos de inspeccion ajenos: {leak}"
+
+
+class _FakeWs:
+    """Stub de WebSocket para probar la politica de entrega del manager."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.sent: list[str] = []
+
+    async def accept(self) -> None:
+        return None
+
+    async def send_text(self, message: str) -> None:
+        self.sent.append(message)
+
+
+async def test_broadcast_targeted_by_station():
+    from app.schemas.websocket import EVENT_AI_SERVICE_DOWN, EVENT_DEFECT_DETECTED
+    from app.services.websocket_manager import WebSocketManager
+
+    mgr = WebSocketManager()
+    ws_a = _FakeWs("A")
+    ws_b = _FakeWs("B")
+    ws_board = _FakeWs("board")
+    await mgr.connect(ws_a, "QA-01")
+    await mgr.connect(ws_b, "QA-02")
+    await mgr.connect(ws_board, "ALL")  # muro de monitoreo
+
+    # Evento de inspeccion dirigido: solo QA-01 + wallboard
+    await mgr.broadcast(EVENT_DEFECT_DETECTED, {"station_id": "QA-01", "serial": "X1"},
+                        station_id="QA-01")
+    assert len(ws_a.sent) == 1
+    assert ws_b.sent == []
+    assert len(ws_board.sent) == 1
+
+    # Estacion desconocida (identificacion erronea): solo eventos globales
+    ws_unknown = _FakeWs("unknown")
+    await mgr.connect(ws_unknown, "UNKNOWN")
+
+    # Evento de inspeccion dirigido: NO llega a la estacion desconocida
+    await mgr.broadcast(EVENT_DEFECT_DETECTED, {"station_id": "QA-01", "serial": "X2"},
+                        station_id="QA-01")
+    assert len(ws_a.sent) == 2
+    assert ws_b.sent == []
+    assert len(ws_board.sent) == 2
+    assert ws_unknown.sent == []
+
+    # Evento global: llega a todos, incluida la estacion desconocida
+    await mgr.broadcast(EVENT_AI_SERVICE_DOWN, {"error_message": "x"}, global_event=True)
+    assert len(ws_a.sent) == 3
+    assert len(ws_b.sent) == 1
+    assert len(ws_board.sent) == 3
+    assert len(ws_unknown.sent) == 1

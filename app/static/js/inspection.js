@@ -4,6 +4,7 @@
 const InspectionFlow = {
     camera: null,
     currentInspection: null,
+    _inspectionSeq: 0,
 
     init() {
         this.camera = new CameraManager(document.getElementById('camera-video'));
@@ -143,10 +144,16 @@ const InspectionFlow = {
         startBtn.disabled = true;
         this._setResultUnknown();
 
+        // Marca esta inspeccion como la mas reciente: si el operador arranca
+        // otra antes de que esta termine, la respuesta obsoleta se descarta
+        // y no pisa el estado/imagen de la inspeccion nueva.
+        const mySeq = ++this._inspectionSeq;
+
+        const socketHint = document.getElementById('socket-select').value;
         const formData = new FormData();
         formData.append('image', blob, 'socket.png');
         formData.append('serial_number', serial);
-        formData.append('socket_type', document.getElementById('socket-select').value);
+        formData.append('socket_type', socketHint);
         formData.append('station_id', this.stationId());
         if (this.operatorId()) formData.append('operator_id', this.operatorId());
 
@@ -156,11 +163,18 @@ const InspectionFlow = {
             if (!resp.ok) {
                 throw new Error(data.detail || `HTTP ${resp.status}`);
             }
+            if (mySeq !== this._inspectionSeq) {
+                // Ya hay una inspeccion mas reciente: descarto este resultado
+                console.warn('[Inspection] Respuesta obsoleta descartada (serial', serial + ')');
+                return;
+            }
+            data.socket_selected = socketHint;
             this._renderResult(data);
             stateEl.textContent = data.status === 'FAIL' ? 'DEFECTO' : 'COMPLETADO';
             stateEl.className = 'font-mono ' + (data.status === 'FAIL' ? 'text-red-400' : 'text-green-400');
             status.textContent = `OK en ${(data.inference_time_ms / 1000).toFixed(1)}s`;
         } catch (err) {
+            if (mySeq !== this._inspectionSeq) return;
             console.error('[Inspection]', err);
             stateEl.textContent = 'ERROR';
             stateEl.className = 'font-mono text-red-400';
@@ -169,9 +183,12 @@ const InspectionFlow = {
                 window.wsClient.showAlert(`Error de inspeccion: ${err.message}`, 'danger');
             }
         } finally {
-            startBtn.disabled = false;
-            document.getElementById('last-inspection-time').textContent =
-                new Date().toLocaleTimeString();
+            // Solo la inspeccion mas reciente habilita el boton y marca la hora
+            if (mySeq === this._inspectionSeq) {
+                startBtn.disabled = false;
+                document.getElementById('last-inspection-time').textContent =
+                    new Date().toLocaleTimeString();
+            }
         }
     },
 
@@ -192,8 +209,37 @@ const InspectionFlow = {
             Math.round(data.confidence * 100) + '%';
         document.getElementById('result-time').textContent =
             (data.inference_time_ms / 1000).toFixed(1) + 's';
-        document.getElementById('result-socket').textContent =
-            data.socket_type_detected || '--';
+
+        // Estacion propietaria del resultado (guarda anti-confusion):
+        // si el resultado llego de OTRA estacion, se marca en rojo con un
+        // aviso explicito en vez de mostrarlo como si fuera local.
+        const stationEl = document.getElementById('result-station');
+        const localStation = (this.stationId() || 'UNKNOWN').toUpperCase();
+        const resultStation = (data.station_id || localStation).toUpperCase();
+        stationEl.textContent = resultStation;
+        const mismatch = !!data.station_id && resultStation !== localStation;
+        stationEl.className = 'font-mono text-sm ' +
+            (mismatch ? 'text-red-400' : 'text-slate-200');
+        document.getElementById('result-station-warn').classList.toggle('hidden', !mismatch);
+        if (mismatch && window.wsClient) {
+            window.wsClient.showAlert(
+                `AVISO: este resultado es de la estacion ${data.station_id} ` +
+                `(tu estacion es ${localStation})`,
+                'danger');
+        }
+
+        // Socket: tipo detectado por IA + tipo seleccionado por el operador
+        let socketText = data.socket_type_detected || '--';
+        const sel = data.socket_selected;
+        if (sel && sel !== 'AUTO') socketText += ` (seleccionado: ${sel})`;
+        document.getElementById('result-socket').textContent = socketText;
+        document.getElementById('result-pins').textContent =
+            (data.pin_count !== null && data.pin_count !== undefined) ? data.pin_count : '--';
+
+        // Metodo de deteccion: HYBRID (medicion CV + verificacion IA),
+        // CV (solo medicion, IA sin servicio) o VLM (camino clasico)
+        document.getElementById('result-detection-method').textContent =
+            data.detection_method || '--';
 
         const locList = document.getElementById('result-locations');
         locList.innerHTML = '';
@@ -209,7 +255,31 @@ const InspectionFlow = {
         evBtn.href = data.annotated_image_url;
         evBtn.classList.remove('hidden');
 
+        // Trazabilidad (aislamiento S5): serial + ID de inspeccion. La imagen
+        // y el zoom son de ESTA inspeccion (URL unica por carpeta de evidencia).
+        document.getElementById('result-serial').textContent =
+            data.serial_number || data.serial || '--';
         const inspId = data.inspection_id;
+        const idEl = document.getElementById('result-insp-id');
+        idEl.textContent = inspId ? String(inspId).slice(0, 8) : '--';
+        idEl.title = String(inspId || '');
+
+        const cropBtn = document.getElementById('btn-socket-crop');
+        if (data.socket_crop_url) {
+            cropBtn.href = data.socket_crop_url;
+            cropBtn.classList.remove('hidden');
+        } else {
+            cropBtn.classList.add('hidden');
+        }
+
+        const cvBtn = document.getElementById('btn-cv-analysis');
+        if (data.cv_analysis_url) {
+            cvBtn.href = data.cv_analysis_url;
+            cvBtn.classList.remove('hidden');
+        } else {
+            cvBtn.classList.add('hidden');
+        }
+
         document.getElementById('btn-force-pass').dataset.id = inspId;
         document.getElementById('btn-force-fail').dataset.id = inspId;
         document.getElementById('btn-force-pass').disabled = false;
@@ -220,8 +290,19 @@ const InspectionFlow = {
         const badge = document.getElementById('result-status');
         badge.textContent = '...';
         badge.className = 'badge badge-unknown';
-        ['result-defects', 'result-confidence', 'result-time', 'result-socket']
+        ['result-defects', 'result-confidence', 'result-time', 'result-socket',
+          'result-pins', 'result-detection-method']
             .forEach(id => document.getElementById(id).textContent = '--');
+        const stationEl = document.getElementById('result-station');
+        stationEl.textContent = '--';
+        stationEl.className = 'font-mono text-sm text-slate-200';
+        document.getElementById('result-station-warn').classList.add('hidden');
+        document.getElementById('result-serial').textContent = '--';
+        const idEl = document.getElementById('result-insp-id');
+        idEl.textContent = '--';
+        idEl.title = '';
+        document.getElementById('btn-socket-crop').classList.add('hidden');
+        document.getElementById('btn-cv-analysis').classList.add('hidden');
         document.getElementById('result-locations').innerHTML = '';
         document.getElementById('result-observations').textContent = '';
         document.getElementById('btn-force-pass').disabled = true;

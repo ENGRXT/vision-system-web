@@ -5,7 +5,14 @@ import re
 
 SERIAL_REGEX = re.compile(r"^[A-Z0-9]{4,50}$")
 
-SOCKET_TYPES = ("INTEL_LGA1700", "AMD_AM5", "AUTO")
+SOCKET_TYPES = (
+    "AUTO",
+    "INTEL_LGA1151",
+    "INTEL_LGA1200",
+    "INTEL_LGA1700",
+    "AMD_AM4",
+    "AMD_AM5",
+)
 
 ALLOWED_IMAGE_MIME = ("image/png", "image/jpeg", "image/webp")
 

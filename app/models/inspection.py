@@ -47,6 +47,10 @@ class Inspection(Base):
     ai_defect_locations: Mapped[list] = mapped_column(
         JSONType, default=list, nullable=False
     )
+    ai_pin_count: Mapped[Optional[int]] = mapped_column(Integer)
+    # Metodo de deteccion: HYBRID (CV+VLM), CV (solo medicion, IA sin
+    # servicio) o VLM (camino clasico sin medicion CV)
+    ai_detection_method: Mapped[Optional[str]] = mapped_column(String(20))
     ai_confidence: Mapped[Optional[Decimal]] = mapped_column(Numeric(3, 2))
     ai_observations: Mapped[Optional[str]] = mapped_column(Text)
     ai_model_used: Mapped[Optional[str]] = mapped_column(String(100))

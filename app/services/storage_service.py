@@ -2,12 +2,14 @@
 
 Estructura:
   <base>/MES/01-15-2026/SERIAL_01152026/
-      01_original.png
-      02_annotated.png
-      metadata.json
+       01_original.png
+       02_annotated.png
+       03_socket_crop.png   (solo si el pipeline corto el socket)
+       metadata.json
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 from datetime import datetime, timezone
@@ -33,20 +35,27 @@ class StorageService:
             logger.warning(f"Storage path no creable aun ({exc}); se creara en runtime")
 
     def get_inspection_folder(self, serial: str, timestamp: datetime) -> Path:
+        """Crea la carpeta de evidencia con la nomenclatura del sistema.
+
+        La creacion es atomica (mkdir sin exist_ok) para que dos
+        inspecciones SIMULTANEAS del mismo serial no compartan carpeta
+        y se pisen los archivos de evidencia entre estaciones.
+        """
         month_name = timestamp.strftime("%B").upper()
         date_folder = timestamp.strftime("%m-%d-%Y")
         serial_folder = f"{serial}_{timestamp.strftime('%m%d%Y')}"
         base = self.base_path / month_name / date_folder
-        path = base / serial_folder
-        if not path.exists():
-            path.mkdir(parents=True, exist_ok=True)
+        for counter in range(100):
+            name = serial_folder if counter == 0 else f"{serial_folder}_{counter:03d}"
+            path = base / name
+            try:
+                # Sin exist_ok: si ya existe (inspeccion concurrente),
+                # FileExistsError y probamos el siguiente contador
+                path.mkdir(parents=True)
+            except FileExistsError:
+                continue
             return path
-        counter = 1
-        while (base / f"{serial_folder}_{counter:03d}").exists():
-            counter += 1
-        path = base / f"{serial_folder}_{counter:03d}"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+        raise RuntimeError(f"Imposible crear carpeta de evidencia para {serial}")
 
     def save_inspection(
         self,
@@ -68,8 +77,19 @@ class StorageService:
         original_path.write_bytes(normalized)
 
         annotated_path = folder / "02_annotated.png"
-        annotated = annotate_image(normalized, ai_result)
+        annotated = annotate_image(normalized, ai_result, socket_bbox=ai_result.socket_bbox)
         annotated_path.write_bytes(annotated)
+
+        # Evidencia extra: el recorte donde se enfoco la IA (solo si hay crop)
+        if ai_result.crop_base64:
+            crop_path = folder / "03_socket_crop.png"
+            crop_path.write_bytes(base64.b64decode(ai_result.crop_base64))
+
+        # Evidencia de la medicion CV: los pines exactos que midio el sistema
+        # (solo si hubo medicion CV)
+        if ai_result.cv_analysis_base64:
+            cv_path = folder / "04_cv_analysis.png"
+            cv_path.write_bytes(base64.b64decode(ai_result.cv_analysis_base64))
 
         meta_path = folder / "metadata.json"
         with open(meta_path, "w", encoding="utf-8") as f:

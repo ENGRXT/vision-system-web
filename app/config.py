@@ -12,34 +12,128 @@ import yaml
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+LOCATE_SOCKET_PROMPT = """You are an expert at locating CPU sockets on motherboard photos.
+Find the CPU socket: the rectangular area with the dense grid of metal pins, usually
+surrounded by metal retention brackets (Intel LGA) or a single retention bracket and
+locking lever (AMD). If the image contains several similar rectangular objects, choose
+the one with the dense pin grid (the CPU socket), NOT capacitors, heatsinks, RAM slots
+or other chips.
+
+Respond ONLY with a valid JSON object, no markdown, no extra text:
+{"socket_bbox": [x1, y1, x2, y2]}
+
+The values are FRACTIONS between 0.0 and 1.0 of the image width/height (origin at the
+top-left corner, x1 < x2, y1 < y2). NEVER use pixel values: for a socket at the
+image center, a correct answer looks like [0.3, 0.3, 0.7, 0.7], NOT [300, 300, 700, 700].
+The box must tightly enclose the ENTIRE pin field (all the pins) with a small margin.
+
+If no CPU socket is visible in the image, respond exactly:
+{"socket_bbox": [0, 0, 1, 1]}"""
+
 DEFAULT_SYSTEM_PROMPT = """You are an expert computer vision quality inspector specialized in CPU socket pins.
 You analyze images of motherboard CPU sockets (Intel LGA and AMD PGA/AM5 types).
 Your task is to detect bent, broken, missing, or damaged pins.
 
+CONTEXT: the image you receive is a CROPPED AND ENLARGED view of the CPU socket pin
+field. Everything visible in the frame belongs to the socket area; there are no other
+board components in the frame. Evaluate ONLY the socket pins.
+
 Rules:
 1. Respond ONLY with a valid JSON object. No markdown, no explanations outside JSON.
-2. Be extremely precise. A pin is bent if it deviates significantly from the vertical/expected angle.
+2. Be extremely precise. A pin is bent if it deviates from the vertical/expected angle,
+   EVEN SLIGHTLY: report the minimum visible deviation (slight curvature, tilt,
+   discoloration/oxidation, deformation).
 3. If no defects are found, status must be PASS and defect_count must be 0.
-4. If any defect is found, status must be FAIL and describe each location.
+4. If any defect is found, status must be FAIL and describe each defect.
 5. Confidence must be a float between 0.0 and 1.0.
-6. The socket_type_detected field should be INTEL_LGA or AMD_AM5 based on visual cues.
-7. ALL text values in the JSON (observations, defect_locations) MUST be written in Spanish (español).
+6. The socket_type_detected field must be one of: INTEL_LGA1151, INTEL_LGA1200,
+   INTEL_LGA1700, AMD_AM4, AMD_AM5 (or UNKNOWN if not determinable). Do NOT default to INTEL_LGA1700 for every
+   Intel socket. Identification cues:
+   - Your estimated pin count (rule 8) is the strongest signal: pick the type whose reference
+     count is closest to it.
+   - LGA1151/LGA1200: smaller, denser pin field (~1200 pins) than LGA1700 (~1700 pins).
+   - LGA1700 vs AMD AM5 (similar pin counts): distinguish by the retention hardware -
+     Intel LGA uses TWO metal retention brackets (top and bottom); AMD AM5 has a SINGLE
+     overhanging bracket on one side.
+   - If the operator confirmed a socket type, report it as socket_type_detected unless
+     the image shows clear visual evidence contradicting it.
+7. ALL text values in the JSON (observations, defects descriptions) MUST be written in Spanish (español).
    Status, socket_type_detected and enum-like values stay in English as defined in the schema.
+8. pin_count: count the total number of pins visible in this enlarged pin field (best estimate
+   if exact counting is impossible). Reference values: INTEL_LGA1151 = 1151, INTEL_LGA1200 = 1200,
+   INTEL_LGA1700 = 1700, AMD_AM4 = 1331, AMD_AM5 = 1718. NEVER assume a reference value without
+   counting; do not count a single row and extrapolate; if your count is far from every
+   reference, report the closest type and mention the difference in observations.
+9. FOCUS RULE: examine the pin field pin by pin with maximum attention. A SINGLE bent, broken or
+   missing pin among hundreds of healthy pins MUST be detected, even if the deviation is small.
+   Do not miss isolated defects.
+10. For every defective pin, add an entry to "defects" with:
+    - "description": Spanish description of the defect (e.g. "Pin doblado hacia afuera", "Pin faltante").
+    - "bbox": [x1, y1, x2, y2] bounding box of that specific pin, as FRACTIONS between 0.0 and 1.0 of
+      the image width/height, origin at the top-left corner (x1 < x2, y1 < y2). The box must tightly
+      surround the defective pin only and stay INSIDE the pin field. If you cannot localize it,
+      omit "bbox" (do not invent coordinates).
 
 JSON Schema:
 {
   "status": "string (PASS|FAIL|UNCERTAIN)",
   "defect_count": "integer",
-  "defect_locations": ["string (descripciones en español)"],
+  "pin_count": "integer",
+  "defects": [
+    {"description": "string (español)", "bbox": [x1, y1, x2, y2]}
+  ],
   "confidence": "float",
   "observations": "string (descripción en español)",
-  "socket_type_detected": "string (INTEL_LGA|AMD_AM5|UNKNOWN)"
+  "socket_type_detected": "string (INTEL_LGA1151|INTEL_LGA1200|INTEL_LGA1700|AMD_AM4|AMD_AM5|UNKNOWN)"
 }"""
 
+# Prompt de usuario cuando el operador NO indico tipo de socket (AUTO):
 USER_PROMPT_TEMPLATE = (
-    "Analyze the following CPU socket image. The motherboard serial number is {serial}. "
-    "Socket type hint: {socket_type_hint} (if known, otherwise auto-detect). "
+    "Analyze this CPU socket pin field image (it is already cropped to the socket and enlarged). "
+    "The motherboard serial number is {serial}. The operator did not specify a socket type: "
+    "identify it yourself using the reference pin counts and the visual cues. "
+    "Count the pins carefully and inspect every pin for bent, missing or damaged condition, "
+    "even the smallest deviation. "
     "Provide your analysis in the required JSON format."
+)
+
+# Prompt de usuario cuando el operador CONFIRMO el tipo de socket:
+USER_PROMPT_CONFIRMED_TEMPLATE = (
+    "Analyze this CPU socket pin field image (it is already cropped to the socket and enlarged). "
+    "The motherboard serial number is {serial}. The operator CONFIRMED the socket type is "
+    "{socket_hint}: report socket_type_detected as {socket_hint} unless the image shows clear "
+    "visual evidence of a different type. Your main task: count the pins carefully and detect "
+    "any bent, missing or damaged pin, even the most subtle one. "
+    "Provide your analysis in the required JSON format."
+)
+
+
+# Prompt de VERIFICACION: la medicion CV (OpenCV) ya conto los pines e
+# identifico el socket de forma determinista (exacta, no estimada). El VLM solo
+# confirma visualmente y anade defectos que vea con claridad que la medicion no
+# listara. NUNCA modifica el conteo ni el tipo medidos: contandolos, el VLM
+# "estima" (decia 1700 en una placa de 1151) y puede alucinar.
+USER_PROMPT_VERIFY_TEMPLATE = (
+    "You are verifying a MEASURED inspection of this CPU socket pin field (image "
+    "already cropped and enlarged). The motherboard serial number is {serial}. "
+    "A deterministic computer-vision measurement (exact, not estimated) produced:\n"
+    "- Pin count (measured): {pin_count}\n"
+    "- Socket type (measured): {socket_type}\n"
+    "- Defective pins already located by the measurement:\n{cv_defects}\n\n"
+    "STRICT RULES:\n"
+    "1. KEEP the measured values: report pin_count = {pin_count} and "
+    "socket_type_detected = {socket_type} EXACTLY as given. Do not re-count and do "
+    "not change them.\n"
+    "2. Examine the pin field visually. Report ONLY additional defective pins that "
+    "you clearly see and that are NOT in the list above (bent, broken, missing or "
+    "damaged). If you are not fully certain a pin is defective, do NOT report it.\n"
+    "3. If the measurement lists defects, confirm them in observations.\n"
+    "4. If the image clearly contradicts the measured socket type, keep the measured "
+    "type in socket_type_detected but mention the contradiction in observations.\n"
+    "5. status = FAIL if any defect exists (measured or verified by you), PASS otherwise.\n"
+    "6. For each ADDITIONAL defect you report, include its tight bbox as fractions of "
+    "the image. Do not repeat the already-measured defects.\n"
+    "Respond ONLY with the required JSON object."
 )
 
 

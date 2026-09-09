@@ -39,6 +39,29 @@ def _reset_ws_connections():
     ws_manager.active_connections.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_inflight_lock():
+    # El lock por estacion es de modulo: se limpia entre tests para que un
+    # 429 de un test no contamine al siguiente
+    from app.routers.inspection import _inflight
+
+    _inflight.clear()
+    yield
+    _inflight.clear()
+
+
+def png_bytes(width: int = 640, height: int = 480, color=(90, 95, 100)) -> bytes:
+    """PNG valido minimo para tests del pipeline de imagen."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.new("RGB", (width, height), color)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 # --------------------------------------------------------------------- #
 # API tests (async, engine in-memory + override de get_db)
 # --------------------------------------------------------------------- #
@@ -118,7 +141,7 @@ def storage_dir(tmp_path, monkeypatch):
 def mock_ai_pass(monkeypatch):
     from app.services.ai_proxy import AIResult, ai_proxy_service
 
-    async def fake_analyze(image_base64, serial, socket_hint=""):
+    async def fake_analyze(image_bytes, serial, socket_hint=""):
         return AIResult(
             status="PASS",
             defect_count=0,
@@ -136,7 +159,7 @@ def mock_ai_pass(monkeypatch):
 def mock_ai_fail(monkeypatch):
     from app.services.ai_proxy import AIResult, ai_proxy_service
 
-    async def fake_analyze(image_base64, serial, socket_hint=""):
+    async def fake_analyze(image_bytes, serial, socket_hint=""):
         return AIResult(
             status="FAIL",
             defect_count=2,
@@ -154,7 +177,7 @@ def mock_ai_fail(monkeypatch):
 def mock_ai_down(monkeypatch):
     from app.services.ai_proxy import ai_proxy_service
 
-    async def fake_analyze(image_base64, serial, socket_hint=""):
+    async def fake_analyze(image_bytes, serial, socket_hint=""):
         raise RuntimeError("AI service unreachable")
 
     monkeypatch.setattr(ai_proxy_service, "analyze_socket", fake_analyze)

@@ -1,11 +1,13 @@
 # VISION-SYSTEM WEB v4.0
 
 Sistema Web de **inspección automatizada de pines en sockets de motherboards**
-(Intel LGA / AMD AM5) mediante un VLM local:
+(Intel LGA / AMD AM5) mediante un **pipeline híbrido**: visión artificial
+determinista (OpenCV) que MIDE (conteo exacto de pines, tipo de socket,
+defectos) + un VLM local que solo VERIFICA:
 **Qwen3-VL-32B-Instruct-FP8** servido con **vLLM** (API OpenAI-compatible).
 
 El operador escanea el número de serie con un escáner USB HID (emula teclado),
-la cámara USB captura el socket, la IA clasifica el estado (PASS / FAIL /
+la cámara USB captura el socket, el sistema clasifica el estado (PASS / FAIL /
 UNCERTAIN) y el sistema:
 
 - guarda evidencia audit (`MES/DD-MM-YYYY/SERIAL_MMDDYYYY/`),
@@ -30,7 +32,7 @@ UNCERTAIN) y el sistema:
 
 **Stack:** FastAPI · SQLAlchemy 2 (async, asyncpg) · Alembic · PostgreSQL 16 ·
 WebSocket nativo · Nginx · Docker Compose · Vanilla JS (ES6+) + Tailwind CDN ·
-Pillow (anotación de imágenes) · Loguru.
+Pillow (anotación de imágenes) · OpenCV + NumPy (medición CV) · Loguru.
 
 ## Estructura
 
@@ -43,10 +45,13 @@ vision-system-web/
 │   ├── models/                  # inspections, websocket_events, users
 │   ├── schemas/                 # Pydantic (API + eventos WS)
 │   ├── services/
-│   │   ├── ai_proxy.py          # cliente vLLM + retries + circuit breaker
+│   │   ├── ai_proxy.py          # pipeline híbrido CV+VLM + circuit breaker
 │   │   ├── image_processor.py   # base64, normalización, anotación (PIL)
 │   │   ├── storage_service.py   # evidencia en disco + listado/resolve
 │   │   └── websocket_manager.py # broadcast a estaciones conectadas
+│   ├── utils/
+│   │   ├── socket_cv.py         # medición CV: localizar, contar, detectar
+│   │   └── image_ops.py         # normalización, crop, remapeo de bboxes
 │   ├── routers/                 # health, inspection, evidence, config, ws
 │   └── static/                  # SPA: index.html + js + css + assets
 ├── alembic/                     # migraciones (001_initial_schema)
@@ -168,6 +173,8 @@ El cliente envía `ping` (25 s) y recibe `pong`.
         └── SER1234_08312026/          # (colisiones: _001, _002...)
             ├── 01_original.png        # normalizada (RGB, ≤1600 px)
             ├── 02_annotated.png       # con banner de resultado + defectos
+            ├── 03_socket_crop.png     # crop del socket que vio el VLM
+            ├── 04_cv_analysis.png     # medición CV: pines en verde, defectos en rojo
             └── metadata.json          # id, serial, AI result, modelo, ms
 ```
 
@@ -180,6 +187,9 @@ resolución dentro de la base).
 - **Circuit breaker**: tras agotar reintentos se abre y rechaza peticiones
   inmediatas (503) hasta que una siguiente inferencia exitosa lo cierre.
 - Broadcast `AI_SERVICE_DOWN` / `AI_SERVICE_RECOVERED` al fallar/recuperarse.
+- **Degradación CV-only**: con la medición CV hecha y el VLM caído, la
+  inspección NO se bloquea: se devuelve el resultado solo CV
+  (`detection_method="CV"`).
 
 ## Decisiones / desviaciones del diseño original
 

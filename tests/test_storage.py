@@ -113,3 +113,30 @@ def test_resolve_file_blocks_traversal(svc):
     )
     assert svc.resolve_file(month, date, folder.name, "../01_original.png") is None
     assert svc.resolve_file(month, date, "NO_EXISTE", "a.png") is None
+
+
+def test_concurrent_same_serial_gets_distinct_folders(svc):
+    """Creaciones SIMULTANEAS del mismo serial (2 estaciones a la vez)
+    deben dar carpetas distintas, nunca compartidas."""
+    import threading
+
+    now = datetime(2026, 2, 9, 9, 2, 0, tzinfo=timezone.utc)
+    folders: list = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def worker():
+        # Barrera para maximizar la concurrencia de la creacion
+        barrier.wait()
+        folder = svc.get_inspection_folder("RACE01", now)
+        with lock:
+            folders.append(folder)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(folders) == 8
+    assert len(set(folders)) == 8, f"Carpetas compartidas: {folders}"

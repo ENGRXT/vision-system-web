@@ -23,7 +23,7 @@ async def websocket_endpoint(
     station_id: str = Query(default="UNKNOWN"),
     operator_id: str = Query(default=""),
 ):
-    await ws_manager.connect(websocket)
+    await ws_manager.connect(websocket, station_id)
     await ws_manager.broadcast(
         EVENT_STATION_CONNECTED,
         {
@@ -31,6 +31,7 @@ async def websocket_endpoint(
             "operator_id": operator_id or None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
+        global_event=True,
     )
     try:
         while True:
@@ -47,6 +48,7 @@ async def websocket_endpoint(
                 "station_id": station_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
+            global_event=True,
         )
     finally:
         await ws_manager.disconnect(websocket)

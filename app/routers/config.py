@@ -79,7 +79,8 @@ async def update_config(
             "changes": changes,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        await ws_manager.broadcast(EVENT_CONFIG_UPDATED, event_payload)
+        # Cambio de configuracion: lo ven todas las estaciones
+        await ws_manager.broadcast(EVENT_CONFIG_UPDATED, event_payload, global_event=True)
         try:
             row = (
                 await db.execute(

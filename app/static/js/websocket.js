@@ -1,5 +1,19 @@
-/* Cliente WebSocket nativo con reconexion automatica.
+/* Cliente WebSocket nativo con reconexion automatica y auto-sanado.
  * Especificacion: VISION-SYSTEM WEB v4 — seccion 5.7.
+ *
+ * Mejoras de robustez (incidente multi-estacion):
+ * - La identificacion (estacion) se aplica ANTES de conectar: configure()
+ *   reconecta siempre que la estacion cambie, incluso si la conexion
+ *   anterior estaba en curso. Corregido: las estaciones quedaban
+ *   conectadas como "UNKNOWN" porque la 1a conexion salia antes de cargar
+ *   la estacion y configure() no reintentaba con el socket en CONNECTING.
+ * - Watchdog: sin datos (msgs/pong) en 75s => cierre forzado + reconexion.
+ *   Evita sockets "zombi" a medias tras reinicios del servidor.
+ * - Al volver la pestana a primer plano, si el socket no esta abierto se
+ *   reconecta de inmediato (navegadores en background dejan sockets
+ *   colgados y el indicador se quedaba en rojo sin reintentar).
+ * - Backoff exponencial 1s -> 30s, se reinicia al conectar.
+ * - Estados visibles: Conectando... / Conectado / Sin conexion.
  */
 'use strict';
 
@@ -7,22 +21,48 @@ class WebSocketClient {
     constructor(url) {
         this.url = url;
         this.ws = null;
-        this.reconnectInterval = 3000;
         this.stationId = 'UNKNOWN';
         this.operatorId = '';
+        this._connectedStation = null; // estacion de la conexion activa
         this._closedByUser = false;
-        this.connect();
+        this._reconnectDelay = 1000;
+        this._maxReconnectDelay = 30000;
+        this._reconnectTimer = null;
+        this._lastDataAt = 0;
+        this._watchdogTimer = null;
+        this._pingTimer = null;
+        // NO conectar solo: App.init() llama a configure() al cargar la
+        // estacion, y esa primera conexion ya lleva la identidad correcta.
+        // Red de seguridad: si configure() nunca llega (error de JS en
+        // otro script), conectar con lo que se lea del select.
+        setTimeout(() => {
+            if (!this.ws) {
+                const sel = document.getElementById('station-select');
+                const op = document.getElementById('operator-input');
+                this.configure(sel ? sel.value : 'UNKNOWN', op ? op.value.trim() : '');
+            }
+        }, 1500);
     }
 
+    // Aplica identificacion y garantiza conexion con ella. Si ya hay
+    // conexion abierta con la misma estacion, no hace nada.
     configure(stationId, operatorId) {
-        this.stationId = stationId || 'UNKNOWN';
-        this.operatorId = operatorId || '';
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this._closedByUser = true;
-            this.ws.close();
-            this._closedByUser = false;
-            this.connect();
+        const station = (stationId || 'UNKNOWN').toUpperCase();
+        const operator = operatorId || '';
+        const identityChanged = station !== this.stationId;
+        this.stationId = station;
+        this.operatorId = operator;
+
+        const st = this.ws ? this.ws.readyState : WebSocket.CLOSED;
+        const needsConnect =
+            !this.ws ||
+            st === WebSocket.CLOSED ||
+            st === WebSocket.CLOSING ||
+            identityChanged;
+        if (needsConnect) {
+            this._connectNow();
         }
+        // Caso CONNECTING con la misma estacion: dejar terminar el handshake.
     }
 
     _buildUrl() {
@@ -33,45 +73,93 @@ class WebSocketClient {
         return `${this.url}?${params.toString()}`;
     }
 
-    connect() {
-        this.ws = new WebSocket(this._buildUrl());
+    _connectNow() {
+        // Cancela reconexiones pendientes y aborta cualquier conexion
+        // en curso (p. ej. iniciada con identidad antigua).
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+        if (this.ws) {
+            const old = this.ws;
+            old.onopen = null;
+            old.onmessage = null;
+            old.onclose = null;
+            old.onerror = null;
+            if (old.readyState === WebSocket.OPEN || old.readyState === WebSocket.CONNECTING) {
+                try { old.close(); } catch { /* ya cerrada */ }
+            }
+        }
+        this.ws = null;
+        this._stopPing();
+        this._stopWatchdog();
+        this.showStatus('connecting');
 
-        this.ws.onopen = () => {
-            console.log('[WS] Conectado');
+        let socket;
+        try {
+            socket = new WebSocket(this._buildUrl());
+        } catch (err) {
+            console.error('[WS] No se pudo crear el socket:', err);
+            this._scheduleReconnect();
+            return;
+        }
+        this.ws = socket;
+        this._connectedStation = this.stationId;
+
+        socket.onopen = () => {
+            if (this.ws !== socket) return; // obsoleta
+            this._reconnectDelay = 1000;
+            this._lastDataAt = Date.now();
+            console.log('[WS] Conectado como', this.stationId);
             this.showStatus('online');
             this._startPing();
+            this._startWatchdog();
         };
 
-        this.ws.onmessage = (event) => {
+        socket.onmessage = (event) => {
+            if (this.ws !== socket) return; // obsoleta
+            this._lastDataAt = Date.now();
+            if (event.data === 'pong') return;
             let message;
             try {
                 message = JSON.parse(event.data);
             } catch {
-                if (event.data === 'pong') return;
                 return;
             }
             this.handleMessage(message);
         };
 
-        this.ws.onclose = () => {
+        socket.onclose = () => {
+            if (this.ws !== socket) return; // obsoleta
             console.log('[WS] Desconectado, reconectando...');
             this.showStatus('offline');
             this._stopPing();
-            if (!this._closedByUser) {
-                setTimeout(() => this.connect(), this.reconnectInterval);
-            }
+            this._stopWatchdog();
+            this.ws = null;
+            this._scheduleReconnect();
         };
 
-        this.ws.onerror = (error) => {
+        socket.onerror = (error) => {
             console.error('[WS] Error:', error);
+            // onclose siempre sigue a onerror; alli se programa la reconexion.
         };
+    }
+
+    _scheduleReconnect() {
+        if (this._reconnectTimer) return;
+        this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null;
+            const delay = this._reconnectDelay;
+            this._reconnectDelay = Math.min(delay * 2, this._maxReconnectDelay);
+            this._connectNow();
+        }, this._reconnectDelay);
     }
 
     _startPing() {
         this._stopPing();
         this._pingTimer = setInterval(() => {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send('ping');
+                try { this.ws.send('ping'); } catch { /* socket en cierre */ }
             }
         }, 25000);
     }
@@ -83,37 +171,85 @@ class WebSocketClient {
         }
     }
 
+    // Watchdog: el servidor corta a los 60s sin datos y el cliente pings
+    // cada 25s, asi en normal siempre hay actividad. Si aun asi pasan
+    // 75s sin nada, la conexion esta "a medias" (zombi): forzar cierre.
+    _startWatchdog() {
+        this._stopWatchdog();
+        this._watchdogTimer = setInterval(() => {
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+            if (Date.now() - this._lastDataAt > 75000) {
+                console.warn('[WS] 75s sin datos — forzando reconexion');
+                try { this.ws.close(); } catch { /* ya cerrada */ }
+            }
+        }, 10000);
+    }
+
+    _stopWatchdog() {
+        if (this._watchdogTimer) {
+            clearInterval(this._watchdogTimer);
+            this._watchdogTimer = null;
+        }
+    }
+
     showStatus(state) {
         const el = document.getElementById('ws-status');
         if (!el) return;
-        el.className = `status-pill ${state === 'online' ? 'status-online' : 'status-offline'}`;
-        el.textContent = state === 'online' ? 'WS: Conectado' : 'WS: Sin conexion';
+        if (state === 'online') {
+            el.className = 'status-pill status-online';
+            el.textContent = 'WS: Conectado';
+        } else if (state === 'connecting') {
+            el.className = 'status-pill status-connecting';
+            el.textContent = 'WS: Conectando...';
+        } else {
+            el.className = 'status-pill status-offline';
+            el.textContent = 'WS: Sin conexion';
+        }
+    }
+
+    // Verdadero solo si el evento pertenece a la estacion local
+    _isLocalStation(data) {
+        const sid = (data && data.station_id || '').toLowerCase();
+        const local = (this.stationId || '').toLowerCase();
+        return !!sid && sid === local;
     }
 
     handleMessage(message) {
         const { event: eventType, data, timestamp } = message;
         switch (eventType) {
             case 'INSPECTION_STARTED':
-                this.showNotification(
-                    `Inspeccion iniciada: ${data.serial} (${data.station_id})`, 'info');
+                // El backend solo lo envia a la estacion propia; filtro de seguridad extra
+                if (this._isLocalStation(data)) {
+                    this.showNotification(
+                        `Inspeccion iniciada: ${data.serial}`, 'info');
+                }
                 break;
             case 'INSPECTION_COMPLETED':
-                this.showNotification(
-                    `Inspeccion ${data.serial} completada: ${data.status}`, 'info');
-                if (window.InspectionFlow) {
-                    window.InspectionFlow.onRemoteCompleted(data);
+                if (this._isLocalStation(data)) {
+                    this.showNotification(
+                        `Inspeccion ${data.serial} completada: ${data.status}`, 'info');
+                    if (window.InspectionFlow) {
+                        window.InspectionFlow.onRemoteCompleted(data);
+                    }
                 }
                 break;
             case 'INSPECTION_OVERRIDDEN':
-                this.showNotification(
-                    `Override manual: ${data.serial} -> ${data.disposition}`, 'warning');
+                if (this._isLocalStation(data)) {
+                    this.showNotification(
+                        `Override manual: ${data.serial} -> ${data.disposition}`, 'warning');
+                }
                 break;
             case 'DEFECT_DETECTED':
-                this.showAlert(
-                    `DEFECTO en ${data.station_id}: ${data.serial} — ${data.defect_count} pines`,
-                    'danger');
-                this.playAlertSound();
-                this.showDefectImage(data.image_url);
+                // CRITICO: solo se muestra imagen/sonido si el defecto es de
+                // ESTA estacion. Sin este filtro, una estacion veria el
+                // resultado (y la imagen) de otra trabajando en paralelo.
+                if (this._isLocalStation(data)) {
+                    this.showAlert(
+                        `DEFECTO: ${data.serial} — ${data.defect_count} defecto(s)`,
+                        'danger');
+                    this.playAlertSound();
+                    this.showDefectImage(data.image_url);
+                }
                 break;
             case 'AI_SERVICE_DOWN':
                 this.showAlert('Servicio de IA CAIDO', 'warning');
@@ -212,6 +348,35 @@ class WebSocketClient {
         }
     }
 }
+
+// Auto-sanado al volver a primer plano: los navegadores suspenden
+// temporizadores en pestanas en background y pueden dejar el socket
+// colgado; si la pestana se activa sin conexion, reconectar de inmediato.
+document.addEventListener('visibilitychange', () => {
+    const client = window.wsClient;
+    if (!client || document.visibilityState !== 'visible') return;
+    if (!client.ws) {
+        if (client._reconnectTimer) {
+            clearTimeout(client._reconnectTimer);
+            client._reconnectTimer = null;
+        }
+        client._connectNow();
+        return;
+    }
+    const st = client.ws.readyState;
+    if (st === WebSocket.OPEN && Date.now() - client._lastDataAt > 30000) {
+        // Abierta "en papel" pero sin datos: socket zombi, forzar cierre
+        console.warn('[WS] Pestana activa, socket sin datos — reconexion');
+        try { client.ws.close(); } catch { /* ya cerrada */ }
+    } else if (st === WebSocket.CLOSED || st === WebSocket.CLOSING) {
+        if (client._reconnectTimer) {
+            clearTimeout(client._reconnectTimer);
+            client._reconnectTimer = null;
+        }
+        client._connectNow();
+    }
+    // CONNECTING: dejar terminar el handshake.
+});
 
 document.addEventListener('DOMContentLoaded', () => {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';

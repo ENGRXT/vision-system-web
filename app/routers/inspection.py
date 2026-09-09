@@ -35,7 +35,6 @@ from app.schemas.websocket import (
     EVENT_INSPECTION_STARTED,
 )
 from app.services.ai_proxy import ai_proxy_service
-from app.services.image_processor import encode_image_base64
 from app.services.storage_service import storage_service
 from app.services.websocket_manager import ws_manager
 from app.utils.validators import (
@@ -46,6 +45,12 @@ from app.utils.validators import (
 )
 
 router = APIRouter(tags=["inspection"])
+
+# Lock por estacion: UNA sola inspeccion en vuelo por estacion. Si una
+# estacion dispara dos capturas a la vez, la segunda falla rapido (429)
+# en lugar de mezclar imagenes/resultados. Estaciones distintas corren
+# en paralelo sin limite. (Aislamiento S4 del modelo multi-estacion.)
+_inflight: dict[str, str] = {}
 
 
 def _annotated_url(month: str, date: str, folder_name: str, filename: str) -> str:
@@ -71,7 +76,10 @@ async def create_inspection(
     if not is_valid_socket_type(socket_type):
         raise HTTPException(
             status_code=422,
-            detail="socket_type debe ser INTEL_LGA1700, AMD_AM5 o AUTO",
+            detail=(
+                "socket_type debe ser AUTO, INTEL_LGA1151, INTEL_LGA1200, "
+                "INTEL_LGA1700, AMD_AM4 o AMD_AM5"
+            ),
         )
     if not is_allowed_image(image.content_type):
         raise HTTPException(
@@ -88,109 +96,157 @@ async def create_inspection(
     inspection_id = uuid.uuid4()
     timestamp = datetime.now(timezone.utc)
 
-    await ws_manager.broadcast(
-        EVENT_INSPECTION_STARTED,
-        {
+    # ---- Aislamiento S4: bloqueo por estacion (fail-fast) ----
+    station_key = station_id.strip().upper()
+    if station_key in _inflight:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Ya hay una inspeccion en curso en esta estacion "
+                f"({_inflight[station_key]})"
+            ),
+        )
+    _inflight[station_key] = str(inspection_id)
+
+    try:
+        # Evento dirigido a la estacion que inicio la inspeccion (no a todas)
+        await ws_manager.broadcast(
+            EVENT_INSPECTION_STARTED,
+            {
+                "inspection_id": str(inspection_id),
+                "serial": serial,
+                "station_id": station_id,
+                "timestamp": timestamp.isoformat(),
+            },
+            station_id=station_id,
+        )
+
+        start = time.monotonic()
+        try:
+            ai_result = await ai_proxy_service.analyze_socket(
+                image_bytes, serial, socket_type
+            )
+        except Exception as exc:
+            logger.error(f"AI failure for serial {serial}: {exc}")
+            raise HTTPException(status_code=503, detail=f"AI service error: {exc}")
+        inference_time_ms = int((time.monotonic() - start) * 1000)
+
+        month_folder = timestamp.strftime("%B").upper()
+        date_folder = timestamp.strftime("%m-%d-%Y")
+
+        metadata = {
+            "inspection_id": str(inspection_id),
+            "serial_number": serial,
+            "timestamp": timestamp.isoformat(),
+            "station_id": station_id,
+            "operator_id": operator_id,
+            "socket_type_hint": socket_type,
+            "ai_result": ai_result.model_dump(),
+            "ai_model_used": ai_proxy_service.model_name,
+            "ai_inference_time_ms": inference_time_ms,
+        }
+        folder = storage_service.save_inspection(
+            serial, image_bytes, ai_result, metadata, timestamp=timestamp
+        )
+
+        record = Inspection(
+            id=inspection_id,
+            serial_number=serial,
+            timestamp=timestamp,
+            date_folder=date_folder,
+            month_folder=month_folder,
+            station_id=station_id,
+            operator_id=operator_id,
+            socket_type_hint=socket_type,
+            socket_type_detected=ai_result.socket_type_detected,
+            ai_status=ai_result.status,
+            ai_defect_count=ai_result.defect_count,
+            ai_defect_locations=ai_result.defect_locations,
+            ai_pin_count=ai_result.pin_count,
+            ai_detection_method=ai_result.detection_method,
+            ai_confidence=Decimal(str(ai_result.confidence)),
+            ai_observations=ai_result.observations,
+            ai_model_used=ai_proxy_service.model_name,
+            ai_inference_time_ms=inference_time_ms,
+            final_disposition=(
+                ai_result.status if ai_result.status in ("PASS", "FAIL") else "UNCERTAIN"
+            ),
+            evidence_folder_path=str(folder),
+        )
+        db.add(record)
+        await db.commit()
+
+        annotated_url = _annotated_url(
+            month_folder, date_folder, folder.name, record.annotated_image_name
+        )
+        crop_url = (
+            _annotated_url(
+                month_folder, date_folder, folder.name, "03_socket_crop.png"
+            )
+            if ai_result.crop_base64
+            else None
+        )
+        cv_url = (
+            _annotated_url(
+                month_folder, date_folder, folder.name, "04_cv_analysis.png"
+            )
+            if ai_result.cv_analysis_base64
+            else None
+        )
+        result_payload = {
             "inspection_id": str(inspection_id),
             "serial": serial,
+            "status": ai_result.status,
+            "confidence": ai_result.confidence,
+            "pin_count": ai_result.pin_count,
+            "detection_method": ai_result.detection_method,
             "station_id": station_id,
             "timestamp": timestamp.isoformat(),
-        },
-    )
-
-    start = time.monotonic()
-    image_b64 = encode_image_base64(image_bytes)
-    try:
-        ai_result = await ai_proxy_service.analyze_socket(
-            image_b64, serial, socket_type
-        )
-    except Exception as exc:
-        logger.error(f"AI failure for serial {serial}: {exc}")
-        raise HTTPException(status_code=503, detail=f"AI service error: {exc}")
-    inference_time_ms = int((time.monotonic() - start) * 1000)
-
-    month_folder = timestamp.strftime("%B").upper()
-    date_folder = timestamp.strftime("%m-%d-%Y")
-
-    metadata = {
-        "inspection_id": str(inspection_id),
-        "serial_number": serial,
-        "timestamp": timestamp.isoformat(),
-        "station_id": station_id,
-        "operator_id": operator_id,
-        "socket_type_hint": socket_type,
-        "ai_result": ai_result.model_dump(),
-        "ai_model_used": ai_proxy_service.model_name,
-        "ai_inference_time_ms": inference_time_ms,
-    }
-    folder = storage_service.save_inspection(
-        serial, image_bytes, ai_result, metadata, timestamp=timestamp
-    )
-
-    record = Inspection(
-        id=inspection_id,
-        serial_number=serial,
-        timestamp=timestamp,
-        date_folder=date_folder,
-        month_folder=month_folder,
-        station_id=station_id,
-        operator_id=operator_id,
-        socket_type_hint=socket_type,
-        socket_type_detected=ai_result.socket_type_detected,
-        ai_status=ai_result.status,
-        ai_defect_count=ai_result.defect_count,
-        ai_defect_locations=ai_result.defect_locations,
-        ai_confidence=Decimal(str(ai_result.confidence)),
-        ai_observations=ai_result.observations,
-        ai_model_used=ai_proxy_service.model_name,
-        ai_inference_time_ms=inference_time_ms,
-        final_disposition=(
-            ai_result.status if ai_result.status in ("PASS", "FAIL") else "UNCERTAIN"
-        ),
-        evidence_folder_path=str(folder),
-    )
-    db.add(record)
-    await db.commit()
-
-    annotated_url = _annotated_url(
-        month_folder, date_folder, folder.name, record.annotated_image_name
-    )
-    result_payload = {
-        "inspection_id": str(inspection_id),
-        "serial": serial,
-        "status": ai_result.status,
-        "confidence": ai_result.confidence,
-        "station_id": station_id,
-        "timestamp": timestamp.isoformat(),
-    }
-    await ws_manager.broadcast(EVENT_INSPECTION_COMPLETED, result_payload)
-
-    if ai_result.status == "FAIL":
+        }
+        # Eventos dirigidos a la estacion propietaria: otras estaciones no ven
+        # ni suenan con los resultados ajenos (multi-equipo simultaneo)
         await ws_manager.broadcast(
-            EVENT_DEFECT_DETECTED,
-            {
-                **result_payload,
-                "defect_count": ai_result.defect_count,
-                "locations": ai_result.defect_locations,
-                "image_url": annotated_url,
-            },
+            EVENT_INSPECTION_COMPLETED, result_payload, station_id=station_id
         )
 
-    return InspectionResponse(
-        inspection_id=inspection_id,
-        serial_number=serial,
-        timestamp=timestamp,
-        status=ai_result.status,
-        defect_count=ai_result.defect_count,
-        defect_locations=ai_result.defect_locations,
-        confidence=ai_result.confidence,
-        observations=ai_result.observations,
-        socket_type_detected=ai_result.socket_type_detected,
-        evidence_path=str(folder),
-        annotated_image_url=annotated_url,
-        inference_time_ms=inference_time_ms,
-        ai_model_used=ai_proxy_service.model_name,
-    )
+        if ai_result.status == "FAIL":
+            await ws_manager.broadcast(
+                EVENT_DEFECT_DETECTED,
+                {
+                    **result_payload,
+                    "defect_count": ai_result.defect_count,
+                    "locations": ai_result.defect_locations,
+                    "defects": [d.model_dump() for d in ai_result.defects],
+                    "image_url": annotated_url,
+                },
+                station_id=station_id,
+            )
+
+        return InspectionResponse(
+            inspection_id=inspection_id,
+            serial_number=serial,
+            timestamp=timestamp,
+            status=ai_result.status,
+            defect_count=ai_result.defect_count,
+            defect_locations=ai_result.defect_locations,
+            defects=[d.model_dump() for d in ai_result.defects],
+            pin_count=ai_result.pin_count,
+            confidence=ai_result.confidence,
+            observations=ai_result.observations,
+            socket_type_detected=ai_result.socket_type_detected,
+            station_id=station_id,
+            socket_bbox=ai_result.socket_bbox,
+            socket_crop_url=crop_url,
+            cv_analysis_url=cv_url,
+            detection_method=ai_result.detection_method,
+            evidence_path=str(folder),
+            annotated_image_url=annotated_url,
+            inference_time_ms=inference_time_ms,
+            ai_model_used=ai_proxy_service.model_name,
+        )
+    finally:
+        # La estacion queda libre aunque la IA falte (503) o crashee
+        _inflight.pop(station_key, None)
 
 
 @router.get("/api/inspections", response_model=InspectionListResponse)
@@ -237,6 +293,7 @@ async def list_inspections(
                 operator_id=r.operator_id,
                 ai_status=r.ai_status,
                 ai_defect_count=r.ai_defect_count or 0,
+                ai_pin_count=r.ai_pin_count,
                 ai_confidence=(
                     float(r.ai_confidence) if r.ai_confidence is not None else None
                 ),
@@ -280,11 +337,13 @@ async def override_disposition(
         {
             "inspection_id": str(record.id),
             "serial": record.serial_number,
+            "station_id": record.station_id,
             "disposition": body.disposition,
             "reason": body.reason,
             "operator_id": body.operator_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
+        station_id=record.station_id,
     )
     return OverrideResponse(
         inspection_id=record.id,
