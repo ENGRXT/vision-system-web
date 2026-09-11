@@ -87,6 +87,39 @@ JSON Schema:
   "socket_type_detected": "string (INTEL_LGA1151|INTEL_LGA1200|INTEL_LGA1700|AMD_AM4|AMD_AM5|UNKNOWN)"
 }"""
 
+# System prompt EXCLUSIVO de la etapa de verificacion hibrida: el prompt
+# por defecto (DEFAULT_SYSTEM_PROMPT) ordena "add an entry to defects" por
+# CADA pin defectuoso, lo que contradice la regla de no repetir los defectos
+# ya medidos y hace que el VLM los vuelva a listar (~50 tokens de mas).
+# Este prompt compacto alinea el esquema y acorta la respuesta: el servidor
+# vLLM genera ~7 tok/s, asi que cada token ahorrado es tiempo real.
+VERIFY_SYSTEM_PROMPT = """You are an expert CPU socket pin quality inspector VERIFYING a
+deterministic computer-vision measurement. The measurement (pin count, socket
+type, located defects) is authoritative: do not re-count, do not re-type.
+The image is a cropped, enlarged view of the socket pin field only.
+Your job: visually confirm the measurement and find ADDITIONAL defective pins
+(bent, broken, missing or damaged) that are NOT in the measured list.
+
+Respond ONLY with a valid, COMPACT JSON object with EXACTLY these fields:
+{
+  "status": "PASS|FAIL",
+  "defect_count": <integer: measured + additional>,
+  "pin_count": <keep the measured value>,
+  "defects": [ {"description": "español, max 6 words", "bbox": [x1, y1, x2, y2]} ],
+  "confidence": <float 0.0-1.0>,
+  "observations": "español, max 25 words; use empty string if nothing to add",
+  "socket_type_detected": "<keep the measured value>"
+}
+- "defects" lists ONLY ADDITIONAL defective pins; NEVER repeat or restate the
+  measured ones.
+- "bbox": tight box around that specific pin, as fractions 0.0-1.0 of this
+  image (origin top-left). If you cannot localize a defect, omit that defect.
+- "status" = FAIL if any defect exists (measured or additional), PASS otherwise.
+- No markdown, no prose outside JSON, no repeated sentences. Keep the JSON as
+  short as possible: a long answer blocks the production line.
+"""
+
+
 # Prompt de usuario cuando el operador NO indico tipo de socket (AUTO):
 USER_PROMPT_TEMPLATE = (
     "Analyze this CPU socket pin field image (it is already cropped to the socket and enlarged). "
@@ -127,12 +160,19 @@ USER_PROMPT_VERIFY_TEMPLATE = (
     "2. Examine the pin field visually. Report ONLY additional defective pins that "
     "you clearly see and that are NOT in the list above (bent, broken, missing or "
     "damaged). If you are not fully certain a pin is defective, do NOT report it.\n"
-    "3. If the measurement lists defects, confirm them in observations.\n"
-    "4. If the image clearly contradicts the measured socket type, keep the measured "
-    "type in socket_type_detected but mention the contradiction in observations.\n"
-    "5. status = FAIL if any defect exists (measured or verified by you), PASS otherwise.\n"
-    "6. For each ADDITIONAL defect you report, include its tight bbox as fractions of "
+    "3. If the image clearly contradicts the measured socket type, keep the measured "
+    "type in socket_type_detected but mention it in ONE short phrase.\n"
+    "4. status = FAIL if any defect exists (measured or verified by you), PASS otherwise.\n"
+    "5. For each ADDITIONAL defect you report, include its tight bbox as fractions of "
     "the image. Do not repeat the already-measured defects.\n"
+    "SPEED RULE: your JSON is parsed automatically and the inference server is slow, "
+    "so a long answer blocks the production line. Respond with the SHORTEST valid "
+    "JSON: use EXACTLY the fields status, defect_count, pin_count, defects, "
+    "confidence, observations, socket_type_detected. Each item of \"defects\" must "
+    "use exactly {{\"description\": \"...\", \"bbox\": [x1,y1,x2,y2]}}. "
+    "Descriptions in Spanish with MAX 6 words each. \"observations\" in Spanish with "
+    "MAX 25 words (use \"\" if nothing to add). No markdown, no prose outside JSON, "
+    "no restating the measured list, no repeated sentences."
     "Respond ONLY with the required JSON object."
 )
 
@@ -143,10 +183,18 @@ class AIConfig(BaseModel):
     base_url: str = "http://10.145.123.27:8000/v1"
     model_name: str = "qwen3-vl"
     api_key: str = "dummy"
-    timeout_seconds: float = 180.0
+    # Timeout acotado: en produccion una llamada no debe bloquear mas de 60 s
+    # (con medicion CV, al agotarlo se degrada a resultado solo-CV).
+    timeout_seconds: float = 60.0
     max_retries: int = 2
-    max_tokens: int = 4096
+    # La respuesta es un JSON compacto (~150 tokens); el tope bajo limita
+    # generaciones interminables del modelo (antes 4096).
+    max_tokens: int = 512
     temperature: float = 0.0
+    # Modo "thinking" de Qwen3: OFF. Con thinking, el modelo genera miles de
+    # tokens de razonamiento antes del JSON (~90 s por llamada); sin el,
+    # responde directo (~10-20 s).
+    enable_thinking: bool = False
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
 
@@ -198,10 +246,12 @@ class Settings(BaseSettings):
     ai_base_url: str = _y("ai_base_url", "http://10.145.123.27:8000/v1")
     ai_model_name: str = _y("ai_model_name", "qwen3-vl")
     ai_api_key: str = _y("ai_api_key", "dummy")
-    ai_timeout_seconds: float = _y("ai_timeout_seconds", 180.0)
+    ai_timeout_seconds: float = _y("ai_timeout_seconds", 60.0)
     ai_max_retries: int = _y("ai_max_retries", 2)
-    ai_max_tokens: int = _y("ai_max_tokens", 4096)
+    ai_max_tokens: int = _y("ai_max_tokens", 512)
     ai_temperature: float = _y("ai_temperature", 0.0)
+    # Thinking de Qwen3: off por velocidad (ver AIConfig.enable_thinking)
+    ai_enable_thinking: bool = _y("ai_enable_thinking", False)
 
     storage_base_path: str = _y("storage_base_path", "/app/evidence")
 
@@ -215,6 +265,7 @@ class Settings(BaseSettings):
             max_retries=self.ai_max_retries,
             max_tokens=self.ai_max_tokens,
             temperature=self.ai_temperature,
+            enable_thinking=self.ai_enable_thinking,
         )
 
     @property

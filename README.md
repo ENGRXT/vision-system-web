@@ -190,6 +190,11 @@ resolución dentro de la base).
 - **Degradación CV-only**: con la medición CV hecha y el VLM caído, la
   inspección NO se bloquea: se devuelve el resultado solo CV
   (`detection_method="CV"`).
+- **Velocidad para producción**: el modo *thinking* de Qwen3 está desactivado
+  por peticion (`enable_thinking=false`, con reintento automático si el
+  servidor no soporta el campo), el prompt de verificacion exige JSON compacto
+  y el timeout está acotado a 60 s. Medido en placa real: ~90 s antes →
+  ~11-17 s por inspección.
 
 ## Decisiones / desviaciones del diseño original
 

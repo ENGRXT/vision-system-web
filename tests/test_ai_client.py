@@ -242,6 +242,51 @@ async def test_analyze_socket_success_closes_circuit(monkeypatch):
     assert service.circuit_open is False
 
 
+async def test_chat_payload_disables_thinking_for_speed(monkeypatch):
+    # Velocidad en produccion: la peticion al VLM desactiva el modo
+    # "thinking" de Qwen3 (con thinking, ~90 s por llamada; sin el, ~10-20 s)
+    # y usa el tope reducido de tokens.
+    payloads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return _chat_response(json.dumps(PASS_JSON))
+
+    _patch_transport(monkeypatch, handler)
+    result = await AIProxyService().analyze_socket(_grid_png(34, 34), "SER1")
+
+    assert result.detection_method == "HYBRID"
+    assert payloads[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert payloads[0]["max_tokens"] == 512
+
+
+async def test_chat_retries_without_template_kwargs_if_server_rejects(monkeypatch):
+    # vLLM antiguo que no conoce chat_template_kwargs (400): se reintenta de
+    # inmediato SIN el campo (sin gastar el presupuesto de reintentos) y la
+    # inspeccion sigue funcionando.
+    payloads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        payloads.append(body)
+        if "chat_template_kwargs" in body:
+            return httpx.Response(
+                400,
+                json={"error": "unexpected field chat_template_kwargs"},
+                request=request,
+            )
+        return _chat_response(json.dumps(PASS_JSON))
+
+    _patch_transport(monkeypatch, handler)
+    result = await AIProxyService().analyze_socket(_grid_png(34, 34), "SER1")
+
+    assert len(payloads) == 2
+    assert "chat_template_kwargs" in payloads[0]
+    assert "chat_template_kwargs" not in payloads[1]
+    assert result.detection_method == "HYBRID"
+    assert result.status == "PASS"
+
+
 async def test_list_models(monkeypatch):
     _patch_transport(
         monkeypatch, lambda r: _models_response(["qwen3-vl", "llama3"])
@@ -275,6 +320,40 @@ def test_parse_response_invalid_status_rejected():
     bad = {**PASS_JSON, "status": "MAYBE"}
     with pytest.raises(ValueError):
         AIResult(**bad)
+
+
+def test_parse_response_tolerates_defective_pins_alias():
+    # Qwen3 a veces nombra la lista "defective_pins" en vez de "defects"
+    # (la respuesta real lo hacia); sin el alias se perderian en la fusion.
+    content = (
+        '{"status":"FAIL","defect_count":1,"pin_count":1155,'
+        '"defective_pins":[{"bbox_frac":[0.8,0.2,0.9,0.3],'
+        '"defect_type":"pin doblado"}],'
+        '"confidence":0.9,"observations":"1 pin doblado",'
+        '"socket_type_detected":"INTEL_LGA1151"}'
+    )
+    result = AIProxyService()._parse_response(content)
+    assert len(result.defects) == 1
+    assert result.defects[0].bbox == [0.8, 0.2, 0.9, 0.3]
+    assert result.defects[0].description == "pin doblado"
+
+
+def test_verify_prompt_requests_compact_json():
+    # El prompt de verificacion debe exigir JSON corto (el servidor genera
+    # ~7 tok/s: una respuesta larga bloquea la linea de produccion).
+    from app.config import USER_PROMPT_VERIFY_TEMPLATE
+
+    text = USER_PROMPT_VERIFY_TEMPLATE.format(
+        serial="SER1",
+        pin_count=1155,
+        socket_type="INTEL_LGA1151",
+        cv_defects="sin defectos localizados por la medicion",
+    )
+    assert "SPEED RULE" in text
+    assert "MAX 6 words" in text
+    assert "MAX 25 words" in text
+    # Las llaves literales del ejemplo quedaron escapadas para str.format
+    assert '{"description": "...", "bbox": [x1,y1,x2,y2]}' in text
 
 
 def test_parse_socket_bbox_valid():

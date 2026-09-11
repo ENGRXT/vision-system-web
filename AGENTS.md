@@ -6,7 +6,7 @@
 - Mensajes al usuario en español.
 
 ## Comandos
-- Tests: `.venv/bin/python -m pytest -q` (raíz del repo; deben pasar 84 tests).
+- Tests: `.venv/bin/python -m pytest -q` (raíz del repo; deben pasar 88 tests).
 - Sin linter configurado en este repo.
 - JS: `node --check app/static/js/*.js`.
 
@@ -18,9 +18,10 @@ El CV determinista MIDE (autoritativo); el VLM solo VERIFICA (1 llamada).
    morfología + componentes) localiza el campo de pines. Si no lo hace,
    fallback al VLM (`LOCATE_SOCKET_PROMPT`; JSON inválido o caja > 0.95 =
    "sin socket" → imagen completa, NUNCA bloquea).
-2. **Etapa 2 – Crop + zoom** (`app/utils/image_ops.py`, Pillow puro): margen
-   12%, clamp, región <8px → full; lado mayor <1024 → ×2 LANCZOS, >2048 →
-   escala a 2048.
+2. **Etapa 2 – Crop + zoom** (`app/utils/image_ops.py` + `ai_proxy.py`,
+   Pillow puro): margen 12%, clamp, región <8px → full; lado mayor <1024 →
+   ×2 LANCZOS, >1536 → escala a 1536 (teto bajo: cada pixel extra son
+   tokens visuales de prefill para el VLM).
 3. **Etapa 3 – Medir (CV)**: `socket_cv.analyze_pins` sobre la imagen
    COMPLETA (restringida a la región localizada CV/VLM; si no hay región, la
    autodetecta por densidad). Las bboxes de defecto salen en fracciones de la
@@ -29,13 +30,17 @@ El CV determinista MIDE (autoritativo); el VLM solo VERIFICA (1 llamada).
    pines faltantes (celdas vacías con vecinos) y doblados (componentes fuera
    de retícula). Si el CV dijo UNKNOWN y el operador confirmó tipo, se usa el
    confirmado.
-4. **Etapa 4 – Verificar (VLM)**: `USER_PROMPT_VERIFY_TEMPLATE` (1 llamada
-   sobre el crop ampliado, con conteo/tipo medidos en el prompt; los defectos
-   CV se listan en coords del CROP con `full_to_crop_frac`, porque el VLM solo
-   ve el crop). Sin medición CV: camino clásico 2 llamadas (localizar +
-   analizar) con `USER_PROMPT_TEMPLATE`/CONFIRMED. Las bboxes de defecto del
-   VLM (coords del crop) se remapean con `remap_bbox_frac` a la imagen
-   completa ANTES de la fusión; las del CV ya salen en imagen completa.
+4. **Etapa 4 – Verificar (VLM)**: `VERIFY_SYSTEM_PROMPT` +
+   `USER_PROMPT_VERIFY_TEMPLATE` (1 llamada sobre el crop ampliado, con
+   conteo/tipo medidos en el prompt; los defectos CV se listan en coords del
+   CROP con `full_to_crop_frac`, porque el VLM solo ve el crop). El system
+   prompt de verificacion es COMPACTO y coherente: el por defecto ordena
+   listar cada pin defectuoso (contradice "no repetir los medidos" y alarga
+   la respuesta). Sin medición CV: camino clásico 2 llamadas (localizar +
+   analizar) con `USER_PROMPT_TEMPLATE`/CONFIRMED y `DEFAULT_SYSTEM_PROMPT`.
+   Las bboxes de defecto del VLM (coords del crop) se remapean con
+   `remap_bbox_frac` a la imagen completa ANTES de la fusión; las del CV ya
+   salen en imagen completa.
 5. **Fusión** (`_merge_cv_vlm`): conteo/tipo SIEMPRE del CV; defectos = CV +
    VLM (dedup por solapamiento de bbox); FAIL si hay algún defecto.
 - `detection_method`: `HYBRID` (CV+VLM), `CV` (IA caída pero el CV midió →
@@ -74,6 +79,18 @@ El CV determinista MIDE (autoritativo); el VLM solo VERIFICA (1 llamada).
 - IA: vLLM Qwen3-VL (`http://10.145.123.27:8000/v1`, modelo `qwen3-vl`).
   - IMPORTANTE: esta build devuelve la respuesta en `message["reasoning"]` (thinking mode)
     con `content: null` → `ai_proxy.py` debe caer a `reasoning`/`reasoning_content`.
+  - VELOCIDAD: cada peticion envía `chat_template_kwargs={"enable_thinking": false}`
+    (Qwen3 con thinking genera miles de tokens antes del JSON: ~90 s/callada;
+    sin thinking, ~10-20 s). Si el servidor responde 4xx por ese campo
+    (vLLM antiguo), se reintenta de inmediato sin el campo. El prompt de
+    verificacion exige JSON COMPACTO (descripcion ≤6 palabras,
+    observations ≤25 palabras) porque el servidor genera ~7 tok/s
+    (el cuello de botella es la generacion, NO el prefill: se midieron
+    ~54 s con respuesta de 381 tokens a cualquier tamano de imagen);
+    `max_tokens`=512, timeout 60 s: con medicion CV, al agotarlo se degrada a
+    resultado solo-CV. Medido en placa real LGA1151: ~90 s antes de
+    optimizar → ~11-17 s ahora. `_parse_response` tolera alias del modelo
+    (`defective_pins`→`defects`, `bbox_frac`→`bbox`, `defect_type`→`description`).
 - Frontend: HTML/JS estático servido por la API (`/static`), nginx como proxy.
 - Docker local: `docker/docker-compose.local.yml` (puertos 8090 HTTP / 9443 HTTPS / 15432 PG).
   Puertos prod: 8080 / 443.

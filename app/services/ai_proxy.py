@@ -52,6 +52,7 @@ from app.config import (
     USER_PROMPT_CONFIRMED_TEMPLATE,
     USER_PROMPT_TEMPLATE,
     USER_PROMPT_VERIFY_TEMPLATE,
+    VERIFY_SYSTEM_PROMPT,
     settings,
 )
 from app.schemas.websocket import (
@@ -144,33 +145,44 @@ class AIProxyService:
 
         El circuit breaker protege AMBAS etapas: si la IA esta caida, la
         inspeccion falla rapido (503) en lugar de esperarse el timeout.
+
+        VELOCIDAD: se envia `chat_template_kwargs={"enable_thinking": false}`
+        para que Qwen3 responda SIN generar miles de tokens de razonamiento
+        antes del JSON (con thinking, ~90 s por llamada; sin el, ~10-20 s).
+        Si el servidor rechaza el campo (vLLM antiguo, 4xx), se reintenta de
+        inmediato sin el campo, sin gastar el presupuesto de reintentos.
         """
-        payload = {
-            "model": self.model_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": user_text,
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": user_text,
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_b64}"
                         },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{image_b64}"
-                            },
-                        },
-                    ],
-                },
-            ],
-            "max_tokens": settings.ai_max_tokens,
-            "temperature": settings.ai_temperature,
-        }
+                    },
+                ],
+            },
+        ]
 
         last_error: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
+        send_thinking_flag = not settings.ai_enable_thinking
+        attempt = 0
+        while True:
+            payload: dict = {
+                "model": self.model_name,
+                "messages": messages,
+                "max_tokens": settings.ai_max_tokens,
+                "temperature": settings.ai_temperature,
+            }
+            if send_thinking_flag:
+                payload["chat_template_kwargs"] = {"enable_thinking": False}
             try:
                 async with httpx.AsyncClient() as client:
                     response = await client.post(
@@ -206,11 +218,28 @@ class AIProxyService:
                 self._fail_streak = 0
                 return content
 
+            except httpx.HTTPStatusError as exc:
+                if (
+                    send_thinking_flag
+                    and exc.response is not None
+                    and 400 <= exc.response.status_code < 500
+                ):
+                    # Servidor sin soporte de chat_template_kwargs
+                    send_thinking_flag = False
+                    logger.warning(
+                        "El servidor no acepta chat_template_kwargs; "
+                        "se reintenta sin el campo"
+                    )
+                    continue
+                last_error = exc
             except Exception as exc:
                 last_error = exc
-                logger.warning(f"AI attempt {attempt + 1} failed: {exc}")
-                if attempt < self.max_retries:
-                    await asyncio.sleep(2**attempt)
+
+            if attempt >= self.max_retries:
+                break
+            attempt += 1
+            logger.warning(f"AI attempt {attempt} failed: {last_error}")
+            await asyncio.sleep(2 ** (attempt - 1))
 
         self.circuit_open = True
         self._fail_streak += 1
@@ -287,8 +316,11 @@ class AIProxyService:
                 analyze_img = analyze_img.resize(
                     (analyze_img.width * 2, analyze_img.height * 2), Image.LANCZOS
                 )
-            elif longest > 2048:
-                scale = 2048 / longest
+            elif longest > 1536:
+                # Teto en 1536 px: cada pixel extra son tokens visuales
+                # (prefill) para el VLM. El CV ya midio; el VLM solo verifica,
+                # y 1536 px alcanza para ver defectos evidentes.
+                scale = 1536 / longest
                 analyze_img = analyze_img.resize(
                     (
                         max(1, int(analyze_img.width * scale)),
@@ -330,6 +362,12 @@ class AIProxyService:
 
         # Etapa 4 (VLM): verificar la medicion (1 sola llamada) o, sin
         # medicion CV, el analisis clasico.
+        # El prompt de sistema de verificacion es compacto y coherente con el
+        # de usuario (el por defecto contradice la regla de no repetir
+        # defectos medidos y alarga la respuesta).
+        system_prompt = (
+            VERIFY_SYSTEM_PROMPT if pin_analysis is not None else settings.ai.system_prompt
+        )
         if pin_analysis is not None:
             # El VLM solo ve el CROP: las cajas CV (fracciones de la imagen
             # completa) se expresan en fracciones del crop para que el modelo
@@ -366,7 +404,7 @@ class AIProxyService:
             try:
                 text = await self._chat(
                     crop_b64 if crop_b64 else norm_b64,
-                    settings.ai.system_prompt,
+                    system_prompt,
                     user_text,
                 )
                 vlm_result = self._parse_response(text)
@@ -526,7 +564,17 @@ class AIProxyService:
                 content = content[start : end + 1]
 
         data = json.loads(content)
-        data["defects"] = self._normalize_defects(data.get("defects"))
+        # Tolerancia al modelo: Qwen3 a veces nombra la lista "defective_pins"
+        # (o similar) en vez de "defects"; sin esto se perderian los defectos
+        # adicionales del VLM en la fusion.
+        if not data.get("defects"):
+            data["defects"] = (
+                data.get("defective_pins")
+                or data.get("defective_pins")
+                or data.get("defectos")
+                or []
+            )
+        data["defects"] = self._normalize_defects(data["defects"])
         # Compatibilidad: si el modelo no dio listas viejas, las derivamos de defects
         if not data.get("defect_locations") and data["defects"]:
             data["defect_locations"] = [
@@ -550,11 +598,14 @@ class AIProxyService:
                     DefectInfo(
                         description=str(
                             item.get("description")
+                            or item.get("defect_type")
                             or item.get("location")
                             or item.get("descripcion")
                             or ""
                         ),
-                        bbox=AIProxyService._normalize_bbox(item.get("bbox")),
+                        bbox=AIProxyService._normalize_bbox(
+                            item.get("bbox") or item.get("bbox_frac")
+                        ),
                     )
                 )
         return out

@@ -11,9 +11,17 @@ log_level: "INFO"
 ai_base_url: "http://10.145.123.27:8000/v1"
 ai_model_name: "qwen3-vl"
 ai_api_key: "dummy"
-ai_timeout_seconds: 180
+# Timeout acotado (60 s): con medicion CV, al agotarlo se degrada a
+# resultado solo-CV; la inspeccion no se bloquea indefinidamente.
+ai_timeout_seconds: 60
 ai_max_retries: 2
-ai_max_tokens: 4096
+# La respuesta del VLM es un JSON compacto (~150 tokens); el tope bajo evita
+# generaciones interminables (el servidor genera ~7 tok/s).
+ai_max_tokens: 512
 ai_temperature: 0.0
+# Modo "thinking" de Qwen3: OFF. Con thinking el modelo genera miles de
+# tokens de razonamiento antes del JSON (~90 s por llamada); sin el,
+# responde directo (~10-20 s).
+ai_enable_thinking: false
 
 storage_base_path: "/app/evidence"
