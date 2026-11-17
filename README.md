@@ -26,7 +26,7 @@ UNCERTAIN) y el sistema:
                                                    ┌────────────────┼────────────────┐
                                                    ▼                ▼                ▼
                                               PostgreSQL        Evidencia        vLLM (Qwen3-VL)
-                                              (inspecciones,   (volume)     http://10.145.123.27:8000/v1
+                                              (inspecciones,   (volume)     http://localhost:8000/v1
                                                eventos, users)
 ```
 
@@ -94,7 +94,7 @@ Prioridad: **variables de entorno** (`.env`) > `config.yaml` (`VISION_CONFIG`) >
 | Variable | Default | Descripción |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://vision:***@postgres:5432/vision_system` | BD principal |
-| `AI_BASE_URL` | `http://10.145.123.27:8000/v1` | Endpoint vLLM (OpenAI-compatible) |
+| `AI_BASE_URL` | `http://localhost:8000/v1` | Endpoint vLLM (OpenAI-compatible) |
 | `AI_MODEL_NAME` | `qwen3-vl` | Nombre del modelo en vLLM |
 | `AI_API_KEY` | `dummy` | API key (vLLM local no valida) |
 | `AI_TIMEOUT_SECONDS` | `180` | Timeout de inferencia |
