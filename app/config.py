@@ -238,7 +238,7 @@ class Settings(BaseSettings):
     app_version: str = _y("app_version", "4.0.0")
     database_url: str = _y(
         "database_url",
-        "postgresql+asyncpg://vision:vision_password_change_me@postgres:5432/vision_system",
+        "postgresql+asyncpg://vision:CHANGE_ME_TO_A_UNIQUE_RANDOM_VALUE@postgres:5432/vision_system",
     )
     log_level: str = _y("log_level", "INFO")
     cors_origins: list[str] = _y("cors_origins", ["*"])
