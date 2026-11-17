@@ -37,7 +37,7 @@ if [ -n "$HOSTNAME_VAL" ] && [ "$HOSTNAME_VAL" != "localhost" ]; then
     add_dns "$HOSTNAME_VAL"
 fi
 
-# IPv4 locales (excluye loopback); incluye LAN corporativa 10.x/192.168.x
+# IPv4 locales (excluye loopback); incluye red local 10.x/192.168.x
 if command -v ip >/dev/null 2>&1; then
     while read -r addr; do
         [ -n "$addr" ] && add_ip "$addr"
@@ -48,7 +48,7 @@ elif command -v hostname >/dev/null 2>&1; then
     done
 fi
 
-# SANs extra: VISION_CERT_HOSTS="10.145.123.50,estacion-01"
+# SANs extra: VISION_CERT_HOSTS="192.0.2.10,station-01"
 if [ -n "$EXTRA_HOSTS" ]; then
     IFS=',' read -ra EXTRAS <<< "$EXTRA_HOSTS"
     for h in "${EXTRAS[@]}"; do
@@ -75,13 +75,13 @@ rm -f ca.key ca.crt server.key server.csr server.crt san.cnf
 # --- CA local ---
 openssl genrsa -out ca.key 4096 2>/dev/null
 openssl req -x509 -new -nodes -key ca.key -sha256 -days "$DAYS" \
-    -subj "/O=ReconNext/OU=VISION-SYSTEM/CN=VISION-SYSTEM Local CA" \
+    -subj "/O=Open Source Project/OU=Development/CN=Vision System Local CA" \
     -out ca.crt
 
 # --- Certificado servidor ---
 openssl genrsa -out server.key 2048 2>/dev/null
 echo "subjectAltName=$SAN" > san.cnf
-openssl req -new -key server.key -subj "/O=ReconNext/OU=VISION-SYSTEM/CN=vision-system" -out server.csr
+openssl req -new -key server.key -subj "/O=Open Source Project/OU=Development/CN=vision-system" -out server.csr
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
     -days "$DAYS" -sha256 -extfile san.cnf -out server.crt 2>/dev/null
 
