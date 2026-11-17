@@ -180,7 +180,7 @@ USER_PROMPT_VERIFY_TEMPLATE = (
 class AIConfig(BaseModel):
     """Configuracion del servicio de IA (vLLM / Qwen3-VL)."""
 
-    base_url: str = "http://10.145.123.27:8000/v1"
+    base_url: str = "http://localhost:8000/v1"
     model_name: str = "qwen3-vl"
     api_key: str = "dummy"
     # Timeout acotado: en produccion una llamada no debe bloquear mas de 60 s
@@ -243,7 +243,7 @@ class Settings(BaseSettings):
     log_level: str = _y("log_level", "INFO")
     cors_origins: list[str] = _y("cors_origins", ["*"])
 
-    ai_base_url: str = _y("ai_base_url", "http://10.145.123.27:8000/v1")
+    ai_base_url: str = _y("ai_base_url", "http://localhost:8000/v1")
     ai_model_name: str = _y("ai_model_name", "qwen3-vl")
     ai_api_key: str = _y("ai_api_key", "dummy")
     ai_timeout_seconds: float = _y("ai_timeout_seconds", 60.0)
