@@ -101,7 +101,7 @@ Prioridad: **variables de entorno** (`.env`) > `config.yaml` (`VISION_CONFIG`) >
 | `AI_MAX_RETRIES` | `2` | Reintentos con backoff exponencial |
 | `STORAGE_BASE_PATH` | `/app/evidence` | Raíz de evidencia en servidor |
 | `LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR |
-| `POSTGRES_PASSWORD` | `vision_password_change_me` | Solo compose (prod: cambiar) |
+| `POSTGRES_PASSWORD` | `CHANGE_ME_TO_A_UNIQUE_RANDOM_VALUE` | Solo compose (prod: cambiar) |
 | `VISION_HTTPS_PORT` | `443` | Puerto HTTPS publicado (nginx) |
 
 También editable **en caliente** desde la UI (panel Administración) vía
