@@ -5,7 +5,7 @@
 app_name: "VISION-SYSTEM WEB"
 app_version: "4.0.0"
 
-database_url: "postgresql+asyncpg://vision:vision_password_change_me@postgres:5432/vision_system"
+database_url: "postgresql+asyncpg://vision:CHANGE_ME_TO_A_UNIQUE_RANDOM_VALUE@postgres:5432/vision_system"
 log_level: "INFO"
 
 ai_base_url: "http://localhost:8000/v1"
