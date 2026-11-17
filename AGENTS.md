@@ -76,7 +76,7 @@ El CV determinista MIDE (autoritativo); el VLM solo VERIFICA (1 llamada).
 
 ## Entorno
 - Backend: FastAPI + SQLAlchemy (async), PostgreSQL (prod) / SQLite (dev).
-- IA: vLLM Qwen3-VL (`http://10.145.123.27:8000/v1`, modelo `qwen3-vl`).
+- IA: vLLM Qwen3-VL (`http://localhost:8000/v1`, modelo `qwen3-vl`).
   - IMPORTANTE: esta build devuelve la respuesta en `message["reasoning"]` (thinking mode)
     con `content: null` → `ai_proxy.py` debe caer a `reasoning`/`reasoning_content`.
   - VELOCIDAD: cada peticion envía `chat_template_kwargs={"enable_thinking": false}`
