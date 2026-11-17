@@ -1,6 +1,6 @@
 # VISION-SYSTEM WEB v4.0
 
-Sistema Web de **inspección automatizada de pines en sockets de motherboards**
+Framework web de **inspección visual automatizada de pines en sockets de CPU**
 (Intel LGA / AMD AM5) mediante un **pipeline híbrido**: visión artificial
 determinista (OpenCV) que MIDE (conteo exacto de pines, tipo de socket,
 defectos) + un VLM local que solo VERIFICA:
@@ -10,7 +10,7 @@ El operador escanea el número de serie con un escáner USB HID (emula teclado),
 la cámara USB captura el socket, el sistema clasifica el estado (PASS / FAIL /
 UNCERTAIN) y el sistema:
 
-- guarda evidencia audit (`MES/DD-MM-YYYY/SERIAL_MMDDYYYY/`),
+- guarda evidencia de cada inspección en una estructura configurable por fecha y número de serie,
 - notifica en tiempo real a todas las estaciones vía **WebSocket**,
 - permite **override manual** (PASS/FAIL) con motivo y operador,
 - mantiene auditoría de eventos y configuración.
@@ -26,8 +26,8 @@ UNCERTAIN) y el sistema:
                                                    ┌────────────────┼────────────────┐
                                                    ▼                ▼                ▼
                                               PostgreSQL        Evidencia        vLLM (Qwen3-VL)
-                                              (inspecciones,   (volume)     http://10.145.123.27:8000/v1
-                                               eventos, users)
+                                              (inspecciones,   (volume)     Endpoint VLM configurable por `AI_BASE_URL`
+                                               eventos, usuarios)
 ```
 
 **Stack:** FastAPI · SQLAlchemy 2 (async, asyncpg) · Alembic · PostgreSQL 16 ·
@@ -64,7 +64,7 @@ vision-system-web/
 
 ```bash
 bash scripts/install.sh
-# o manualmente:
+# o manualmente (después de definir POSTGRES_PASSWORD y AI_BASE_URL en .env):
 git clone <REPO_URL> vision-system-web && cd vision-system-web
 cp .env.example .env        # editar POSTGRES_PASSWORD, AI_BASE_URL...
 docker compose -f docker/docker-compose.yml up -d --build
@@ -80,8 +80,9 @@ docker compose -f docker/docker-compose.yml exec api alembic upgrade head
 ```bash
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-# requerido: PostgreSQL local y endpoint vLLM accesibles
-export DATABASE_URL=postgresql+asyncpg://vision:pass@localhost:5432/vision_system
+# requerido: PostgreSQL local y endpoint VLM accesibles
+export DATABASE_URL=postgresql+asyncpg://vision:<password>@localhost:5432/vision_system
+export AI_BASE_URL=http://localhost:8000/v1
 alembic upgrade head
 uvicorn app.main:app --reload
 pytest
@@ -94,18 +95,27 @@ Prioridad: **variables de entorno** (`.env`) > `config.yaml` (`VISION_CONFIG`) >
 | Variable | Default | Descripción |
 |---|---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://vision:***@postgres:5432/vision_system` | BD principal |
-| `AI_BASE_URL` | `http://10.145.123.27:8000/v1` | Endpoint vLLM (OpenAI-compatible) |
+| `AI_BASE_URL` | Docker: `http://host.docker.internal:8000/v1`; ejecución local: `http://localhost:8000/v1` | Endpoint VLM compatible con API OpenAI |
 | `AI_MODEL_NAME` | `qwen3-vl` | Nombre del modelo en vLLM |
 | `AI_API_KEY` | `dummy` | API key (vLLM local no valida) |
 | `AI_TIMEOUT_SECONDS` | `180` | Timeout de inferencia |
 | `AI_MAX_RETRIES` | `2` | Reintentos con backoff exponencial |
 | `STORAGE_BASE_PATH` | `/app/evidence` | Raíz de evidencia en servidor |
 | `LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR |
-| `POSTGRES_PASSWORD` | `vision_password_change_me` | Solo compose (prod: cambiar) |
+| `POSTGRES_PASSWORD` | Obligatoria; definir una contraseña aleatoria única | Usuario de PostgreSQL dentro de Docker Compose |
 | `VISION_HTTPS_PORT` | `443` | Puerto HTTPS publicado (nginx) |
 
 También editable **en caliente** desde la UI (panel Administración) vía
 `PUT /api/config` (emite `CONFIG_UPDATED` a todas las estaciones).
+
+## Dependencia del servicio de IA
+
+El modelo de visión no se descarga ni se inicia automáticamente con esta aplicación.
+Debes proporcionar un servidor de inferencia compatible con la API OpenAI y definir
+`AI_BASE_URL`, `AI_MODEL_NAME` y, cuando aplique, `AI_API_KEY`. En Docker para Linux,
+`host.docker.internal` se resuelve mediante `host-gateway` para acceder a un servicio
+que escucha en el host. Si el servidor está en otro equipo o contenedor, configura
+su URL alcanzable desde el contenedor `api`.
 
 ## HTTPS (cámara)
 
@@ -126,7 +136,7 @@ El frontend elige `ws://` o `wss://` automáticamente según el protocolo de la 
 hostname e IPs locales. Para un IP/hostname fijo de la estación:
 
 ```bash
-VISION_CERT_HOSTS="10.145.123.50,estacion-01" bash scripts/gen-certs.sh
+VISION_CERT_HOSTS="192.0.2.10,station-01" bash scripts/gen-certs.sh
 docker compose -f docker/docker-compose.yml restart nginx
 ```
 
@@ -196,16 +206,35 @@ resolución dentro de la base).
   y el timeout está acotado a 60 s. Medido en placa real: ~90 s antes →
   ~11-17 s por inspección.
 
-## Decisiones / desviaciones del diseño original
+## Consideraciones de arquitectura
 
-1. **1 worker de uvicorn** (el diseño proponía 4): el broadcast WebSocket usa
-   un singleton in-process (`ws_manager`); con >1 worker las estaciones solo
-   recibirían los eventos de su worker. Para escalar a multi-worker se
-   requiere un bus compartido (Redis pub/sub).
-2. **Esquema sin autenticación** (B-002 pendiente): la tabla `users` existe de
-   cara a futuro (JWT/roles). En red industrial segmentada se acepta sin auth.
-3. El prompt del modelo vive en `app/config.py` (`DEFAULT_SYSTEM_PROMPT`) y es
-   editable en `config.yaml` bajo `ai.system_prompt`.
+- **Un worker de Uvicorn:** el gestor WebSocket mantiene conexiones en memoria
+  dentro del proceso. Para escalar a varios workers se necesita un bus compartido
+  (por ejemplo, Redis Pub/Sub) y coordinación del estado de inspecciones.
+- El prompt principal del modelo vive en `app/config.py` y puede ajustarse desde
+  la configuración de la aplicación.
+
+## Seguridad y límites de uso
+
+> **Estado actual: prototipo de ingeniería. No desplegar en Internet ni en redes
+> compartidas o no confiables.** Esta versión todavía no implementa autenticación
+> ni autorización por usuario/rol en la API REST o WebSocket.
+
+Los endpoints de inspección, consulta de resultados, descarga de evidencias,
+configuración, override manual, diagnóstico del navegador y notificaciones
+WebSocket son accesibles para cualquier cliente que alcance el servicio. Un
+cliente no autorizado podría consultar datos, enviar imágenes, cambiar la
+configuración de IA o alterar la disposición manual de una inspección.
+
+Para pruebas aisladas, limitar el acceso con firewall y una red privada de
+confianza. Antes de cualquier uso operativo o multiusuario, implementar y probar
+autenticación y autorización en la aplicación, controles de acceso por recurso,
+protección de WebSocket, límites de solicitudes, gestión de secretos y una
+política de retención de evidencias. TLS y CORS no sustituyen autenticación.
+
+Las imágenes, números de serie, identificadores de operador y evidencias pueden
+contener información sensible. Utilizar únicamente datos de prueba hasta que
+el entorno y los controles de seguridad hayan sido revisados.
 
 ## Tests
 

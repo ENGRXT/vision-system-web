@@ -1,10 +1,10 @@
 [project]
 name = "vision-system-web"
 version = "4.0.0"
-description = "VISION-SYSTEM WEB - Sistema Web de Inspeccion Automatizada de Pines en Sockets de Motherboards (VLM Qwen3-VL local)"
+description = "Cross-platform web application for visual CPU socket pin inspection with configurable local vision-language models"
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "ReconNext Engineering" }]
+authors = [{ name = "ENGRXT contributors" }]
 dependencies = [
     "fastapi>=0.111,<1.0",
     "uvicorn[standard]>=0.30",
