@@ -4,7 +4,7 @@ services:
     container_name: vision_postgres
     environment:
       POSTGRES_USER: vision
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_TO_A_UNIQUE_RANDOM_VALUE}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env antes de iniciar}
       POSTGRES_DB: vision_system
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -24,15 +24,17 @@ services:
       dockerfile: docker/Dockerfile
     container_name: vision_api
     environment:
-      DATABASE_URL: postgresql+asyncpg://vision:${POSTGRES_PASSWORD:-CHANGE_ME_TO_A_UNIQUE_RANDOM_VALUE}@postgres:5432/vision_system
+      DATABASE_URL: postgresql+asyncpg://vision:${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env antes de iniciar}@postgres:5432/vision_system
       STORAGE_BASE_PATH: /app/evidence
-      AI_BASE_URL: ${AI_BASE_URL:-http://localhost:8000/v1}
+      AI_BASE_URL: ${AI_BASE_URL:-http://host.docker.internal:8000/v1}
       AI_MODEL_NAME: ${AI_MODEL_NAME:-qwen3-vl}
       AI_API_KEY: ${AI_API_KEY:-dummy}
       AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-60}
       AI_MAX_RETRIES: ${AI_MAX_RETRIES:-2}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       VISION_CONFIG: /app/config.yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - evidence:/app/evidence
       - api_logs:/app/logs
