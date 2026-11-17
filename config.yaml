@@ -8,7 +8,7 @@ app_version: "4.0.0"
 database_url: "postgresql+asyncpg://vision:vision_password_change_me@postgres:5432/vision_system"
 log_level: "INFO"
 
-ai_base_url: "http://10.145.123.27:8000/v1"
+ai_base_url: "http://localhost:8000/v1"
 ai_model_name: "qwen3-vl"
 ai_api_key: "dummy"
 # Timeout acotado (60 s): con medicion CV, al agotarlo se degrada a
