@@ -23,7 +23,7 @@ cd "$INSTALL_DIR"
 if [ ! -f .env ]; then
     log "Creando .env a partir de .env.example..."
     cp .env.example .env
-    echo "  -> Edite .env (POSTGRES_PASSWORD, AI_BASE_URL, etc.) si es necesario."
+    echo "  -> Configure POSTGRES_PASSWORD e AI_BASE_URL en .env antes de continuar."
 fi
 
 if [ ! -f "$INSTALL_DIR/docker/certs/server.crt" ]; then
